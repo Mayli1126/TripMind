@@ -1,0 +1,28 @@
+# Agent 编排：LangGraph + 原生 OpenAI SDK / 官方 MCP SDK
+langgraph>=0.6,<0.7
+langchain-core>=1.0
+langgraph-checkpoint-redis==0.2.1
+redisvl>=0.13,<0.14
+openai>=1.50
+mcp>=1.0
+
+# FastAPI 服务
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# HTTP 客户端
+httpx>=0.27.0
+requests>=2.31.0
+aiohttp>=3.10.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
+
+# uvx 拉起高德 MCP server（amap-mcp-server）
+uv>=0.8.0
+
+# Redis 队列/缓存/配额（阶段D）；langgraph-checkpoint-redis 0.2.1 要求 redis<7
+redis>=5.0,<7.0
+fakeredis>=2.26.0
