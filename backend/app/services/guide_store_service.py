@@ -142,6 +142,33 @@ class GuideStoreService:
             ).fetchone()
         return self._record_from_row(row) if row else None
 
+    def update_candidate_choices(
+        self, source_id: str, choices: dict[str, str]
+    ) -> Optional[GuideSourceRecord]:
+        """把用户在确认板做的选择回写到该篇候选（choices: candidate_id -> user_choice）。
+
+        选择存进 result_json 的候选对象上，聚合接口即刻反映，跨设备一致。
+        未知 candidate_id 静默跳过（候选可能已被合并/删除）。
+        """
+        record = self.get_record(source_id)
+        if record is None or record.result is None:
+            return None
+        valid = {"required", "preferred", "optional", "excluded"}
+        updated = 0
+        for candidate in record.result.candidates:
+            choice = choices.get(candidate.candidate_id)
+            if choice in valid:
+                candidate.user_choice = choice  # type: ignore[assignment]
+                updated += 1
+        if not updated:
+            return record
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                "UPDATE guide_sources SET result_json=? WHERE id=?",
+                (record.result.model_dump_json(), source_id),
+            )
+        return self.get_record(source_id)
+
     def delete_record(self, source_id: str) -> bool:
         """删除攻略记录；事实显式删除（不依赖外键级联，幂等保险）。"""
         with self._lock, self._connection() as connection:

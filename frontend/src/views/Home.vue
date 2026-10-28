@@ -6,7 +6,7 @@
       <div class="planner-heading">
         <div>
           <span class="planner-kicker">CREATE YOUR TRIP</span>
-          <h2>告诉 Agent，你想怎样旅行</h2>
+          <h2>说说你想怎样旅行</h2>
         </div>
         <p>填写越具体，规划越贴近真实需求。常用偏好会自动保存在本机，下次规划无需重复填写。</p>
       </div>
@@ -21,7 +21,7 @@
       </router-link>
 
       <div v-if="matchingCandidateCount" class="candidate-hint">
-        <span>📌 本机已确认 {{ matchingCandidateCount }} 个「{{ formData.city }}」攻略候选地点，规划时将优先安排</span>
+        <span>📌 已勾选 {{ matchingCandidateCount }} 个「{{ formData.city }}」攻略地点，规划时会优先安排</span>
         <router-link to="/guide" class="candidate-hint-link">查看/调整</router-link>
       </div>
 
@@ -146,6 +146,12 @@
         </div>
 
         <!-- 第二步:偏好设置 -->
+        <!-- 高级偏好：低频选项默认收起，保持首屏清爽 -->
+        <div class="advanced-toggle" @click="showAdvanced = !showAdvanced">
+          <span>🧩 更多偏好（住宿档次、预算上限、行程节奏等）</span>
+          <b>{{ showAdvanced ? '收起 ▲' : '展开 ▼' }}</b>
+        </div>
+        <div v-show="showAdvanced" class="advanced-sections">
         <div class="form-section">
           <div class="section-header">
             <span class="section-icon">⚙️</span>
@@ -272,6 +278,7 @@
             />
           </a-form-item>
         </div>
+        </div>
 
         <!-- 提交按钮 -->
         <a-form-item>
@@ -299,7 +306,7 @@
             <div class="agent-working-head">
               <div class="working-orb"><span></span></div>
               <div>
-                <strong>TripMind 正在协作规划</strong>
+                <strong>正在为你规划行程</strong>
                 <p>{{ loadingStatus }}</p>
               </div>
               <b>{{ loadingProgress }}%</b>
@@ -392,14 +399,16 @@ import {
   Tooltip as ATooltip,
   message
 } from 'ant-design-vue'
-import { createSavedTrip, fetchGuideCandidates, generateTripPlanWithProgress, getUserPreferences, resumePlanningJob, saveUserPreferences } from '@/services/api'
-import type { CandidatePlace, PlanningProgressEvent, TripFormData, WaitingInputPayload } from '@/types'
+import { createSavedTrip, fetchGuideCandidates, generateTripPlanWithProgress, getPlanningJob, getUserPreferences, resumePlanningJob, saveUserPreferences, waitForExistingJob } from '@/services/api'
+import type { CandidatePlace, PlanningJobResponse, PlanningProgressEvent, TripFormData, TripPlan, WaitingInputPayload } from '@/types'
 import type { Dayjs } from 'dayjs'
 import dayjs from 'dayjs'
 import AgentIntro from '@/components/AgentIntro.vue'
 
 const router = useRouter()
 const loading = ref(false)
+// 高级偏好默认收起：首屏只保留行程信息，降低首次使用门槛
+const showAdvanced = ref(false)
 const loadingProgress = ref(0)
 const loadingStatus = ref('')
 const progressEvents = ref<PlanningProgressEvent[]>([])
@@ -430,10 +439,10 @@ const orchestrationEvents = computed(() => progressEvents.value.filter(event => 
 const getAgentStatusText = (status: string, durationMs?: number) => {
   const duration = durationMs === undefined ? '' : ` · ${(durationMs / 1000).toFixed(1)}s`
   return ({
-    waiting: '等待调度',
-    running: '并行处理中',
+    waiting: '排队中',
+    running: '查询中',
     completed: `资料已就绪${duration}`,
-    degraded: `已使用降级数据${duration}`
+    degraded: `暂用参考数据${duration}`
   }[status] || status)
 }
 
@@ -542,6 +551,8 @@ onMounted(async () => {
   // 偏好回填可能带入目的地城市，手动算一次候选数量
   void refreshCandidateCount()
   applyGuidePrefill()
+  // 页面刷新后若有进行中的规划任务，恢复进度监听（放在最前，恢复态下用户先看进度）
+  void resumeActiveJob()
 })
 
 // 从攻略导入页"去规划"跳转过来：预填目的城市并滚动到表单
@@ -580,6 +591,108 @@ watch([() => formData.start_date, () => formData.end_date], ([start, end]) => {
 watch(() => formData.travelers, (travelers) => {
   if (formData.rooms > travelers) formData.rooms = travelers
 })
+
+// 进行中规划任务的本机记录键：页面刷新后据此恢复监听
+const ACTIVE_JOB_KEY = 'tripmind.active_job'
+
+// 生成完成后的统一收尾：存行程库、记偏好、写入会话并跳转结果页
+// （正常流程与"刷新后恢复监听"两条路径共用，避免行为不一致）
+const finalizePlan = async (plan: TripPlan, requestData: TripFormData) => {
+  loadingProgress.value = 100
+  loadingStatus.value = '旅行计划已经准备完成'
+  const savedTrip = await createSavedTrip(requestData, plan)
+  try {
+    await saveUserPreferences({
+      origin_city: requestData.origin_city,
+      transportation: requestData.transportation,
+      accommodation: requestData.accommodation,
+      preferences: requestData.preferences,
+      travelers: requestData.travelers,
+      rooms: requestData.rooms,
+      budget_limit: requestData.budget_limit,
+      optimization_goal: requestData.optimization_goal,
+      pace: requestData.pace
+    })
+  } catch {
+    // 偏好保存是辅助能力，不应阻止用户查看已经生成并保存的行程。
+  }
+  sessionStorage.setItem('tripPlan', JSON.stringify(plan))
+  message.success(plan.is_fallback ? '已生成参考计划，请留意核实提醒' : '旅行计划生成成功!')
+  setTimeout(() => router.push(`/trips/${savedTrip.id}`), 450)
+}
+
+// 页面刷新后恢复进行中的规划任务：
+// queued/running 直接续听进度，waiting_input 恢复决策卡片，completed/failed/过期则清记录
+const resumeActiveJob = async () => {
+  const jobId = sessionStorage.getItem(ACTIVE_JOB_KEY)
+  if (!jobId) return
+  let job: PlanningJobResponse
+  try {
+    job = await getPlanningJob(jobId)
+  } catch {
+    sessionStorage.removeItem(ACTIVE_JOB_KEY)  // 任务已过期或不存在
+    return
+  }
+  if (job.status === 'completed' || job.status === 'failed') {
+    sessionStorage.removeItem(ACTIVE_JOB_KEY)
+    message.info(job.status === 'completed' ? '上次的规划已完成，请在"我的行程"中查看' : '上次的规划未成功，可重新提交')
+    return
+  }
+
+  // 恢复监听：请求快照在提交时已存入 sessionStorage
+  const rawRequest = sessionStorage.getItem('tripRequest')
+  if (!rawRequest) {
+    sessionStorage.removeItem(ACTIVE_JOB_KEY)
+    return
+  }
+  let requestData: TripFormData
+  try {
+    requestData = JSON.parse(rawRequest) as TripFormData
+  } catch {
+    sessionStorage.removeItem(ACTIVE_JOB_KEY)
+    return
+  }
+
+  loading.value = true
+  loadingProgress.value = job.progress
+  loadingStatus.value = `已恢复上次进行中的规划任务：${job.message || '正在生成行程'}`
+  if (job.waiting_input) {
+    waitingJobId.value = jobId
+    waitingInput.value = job.waiting_input
+  }
+
+  const task = waitForExistingJob(jobId, (event) => {
+    loadingProgress.value = event.progress
+    loadingStatus.value = event.message
+    const previous = progressEvents.value[progressEvents.value.length - 1]
+    if (!previous || previous.stage !== event.stage || previous.message !== event.message) {
+      progressEvents.value.push(event)
+    }
+  }, (_jobId, payload) => {
+    waitingJobId.value = jobId
+    waitingInput.value = payload
+  })
+  activeTask.value = task
+  try {
+    const plan = await task
+    waitingInput.value = null
+    sessionStorage.removeItem(ACTIVE_JOB_KEY)
+    await finalizePlan(plan, requestData)
+  } catch (error: any) {
+    if (error?.name !== 'AbortError') {
+      message.error(error.message || '恢复的任务执行失败，可重新提交')
+      sessionStorage.removeItem(ACTIVE_JOB_KEY)
+    }
+  } finally {
+    waitingInput.value = null
+    activeTask.value = null
+    setTimeout(() => {
+      loading.value = false
+      loadingProgress.value = 0
+      loadingStatus.value = ''
+    }, 1000)
+  }
+}
 
 const handleSubmit = async () => {
   if (!formData.origin_city) {
@@ -635,6 +748,9 @@ const handleSubmit = async () => {
       candidate_places: await loadConfirmedCandidates(formData.city)
     }
 
+    // 提交即存请求快照与任务 ID：页面刷新后可恢复监听进行中的任务
+    sessionStorage.setItem('tripRequest', JSON.stringify(requestData))
+
     const task = generateTripPlanWithProgress(requestData, (event) => {
       loadingProgress.value = event.progress
       loadingStatus.value = event.message
@@ -646,37 +762,20 @@ const handleSubmit = async () => {
       // 图 interrupt：展示决策卡片等用户选择，选择后 Worker 从断点继续
       waitingJobId.value = jobId
       waitingInput.value = payload
+    }, (jobId) => {
+      sessionStorage.setItem(ACTIVE_JOB_KEY, jobId)
     })
     activeTask.value = task
     const plan = await task
     waitingInput.value = null
-
-    loadingProgress.value = 100
-    loadingStatus.value = '旅行计划已经准备完成'
-    const savedTrip = await createSavedTrip(requestData, plan)
-    try {
-      await saveUserPreferences({
-        origin_city: requestData.origin_city,
-        transportation: requestData.transportation,
-        accommodation: requestData.accommodation,
-        preferences: requestData.preferences,
-        travelers: requestData.travelers,
-        rooms: requestData.rooms,
-        budget_limit: requestData.budget_limit,
-        optimization_goal: requestData.optimization_goal,
-        pace: requestData.pace
-      })
-    } catch {
-      // 偏好保存是辅助能力，不应阻止用户查看已经生成并保存的行程。
-    }
-    sessionStorage.setItem('tripPlan', JSON.stringify(plan))
-    sessionStorage.setItem('tripRequest', JSON.stringify(requestData))
-    message.success(plan.is_fallback ? '已生成参考计划，请留意核实提醒' : '旅行计划生成成功!')
-    setTimeout(() => router.push(`/trips/${savedTrip.id}`), 450)
+    sessionStorage.removeItem(ACTIVE_JOB_KEY)
+    await finalizePlan(plan, requestData)
   } catch (error: any) {
     // 页面离开触发的取消是预期行为，不打扰用户
     if (error?.name !== 'AbortError') {
       message.error(error.message || '生成旅行计划失败,请稍后重试')
+      // 失败的任务不再可恢复（后端重试机制会自行处理），清掉恢复入口
+      sessionStorage.removeItem(ACTIVE_JOB_KEY)
     }
   } finally {
     waitingInput.value = null
@@ -1404,4 +1503,19 @@ const getStageIcon = (stage: string): string => ({
   .form-section { padding: 17px; border-radius: 13px; }
   .parallel-agents { grid-template-columns: 1fr; }
 }
+
+.advanced-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 16px;
+  border: 1px dashed #cfd8e3;
+  border-radius: 12px;
+  cursor: pointer;
+  color: #4a5a72;
+  font-size: 13px;
+  transition: all .15s;
+}
+.advanced-toggle:hover { border-color: #ff6b4a; color: #14213d; }
+.advanced-toggle b { color: #ff6b4a; font-size: 12px; }
 </style>

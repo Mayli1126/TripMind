@@ -20,13 +20,16 @@
       <div v-else class="trip-grid">
         <article v-for="trip in trips" :key="trip.id" class="trip-card">
           <router-link :to="`/trips/${trip.id}`" class="trip-link">
-            <div class="card-visual">
-              <span>{{ cityInitial(trip.city) }}</span>
+            <div class="card-visual" :class="{ 'has-photo': trip.cover_image_url }">
+              <img v-if="trip.cover_image_url" :src="trip.cover_image_url" :alt="trip.city" loading="lazy" @error="trip.cover_image_url = null" />
+              <span v-else>{{ cityInitial(trip.city) }}</span>
+              <div class="trip-status" :class="tripPhase(trip).tone">{{ tripPhase(trip).label }}</div>
               <div class="quality-dot" :class="trip.data_quality">{{ qualityLabel(trip.data_quality) }}</div>
             </div>
             <div class="card-body">
               <div class="card-kicker">{{ trip.start_date }} — {{ trip.end_date }}</div>
               <h2>{{ trip.title }}</h2>
+              <div class="card-city">📍 {{ trip.city }}</div>
               <div class="card-stats">
                 <span><b>{{ trip.days }}</b> 天</span>
                 <span v-if="trip.estimated_budget !== undefined"><b>¥{{ trip.estimated_budget }}</b> 预估</span>
@@ -56,7 +59,7 @@ const trips = ref<SavedTripSummary[]>([])
 
 onMounted(async () => {
   try {
-    trips.value = await listSavedTrips()
+    trips.value = sortTrips(await listSavedTrips())
   } catch (error: any) {
     message.error(error.message || '暂时无法读取行程')
   } finally {
@@ -65,6 +68,31 @@ onMounted(async () => {
 })
 
 const cityInitial = (city: string) => city.slice(0, 1)
+
+// 行程阶段：进行中最醒目、即将出发带倒计时、已结束置后
+const localToday = () => {
+  const date = new Date()
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 10)
+}
+const tripPhase = (trip: SavedTripSummary) => {
+  const today = localToday()
+  if (today > trip.end_date) return { tone: 'past', label: '已结束' }
+  if (today >= trip.start_date) return { tone: 'ongoing', label: '旅行中' }
+  const daysLeft = Math.round((new Date(`${trip.start_date}T00:00:00`).getTime() - new Date(`${today}T00:00:00`).getTime()) / 86400000)
+  return { tone: 'upcoming', label: daysLeft <= 1 ? '明天出发' : `${daysLeft} 天后出发` }
+}
+// 列表排序：旅行中 > 即将出发（近的在前）> 未来 > 已结束（近的在前）
+const sortTrips = (list: SavedTripSummary[]) => {
+  const rank = (t: SavedTripSummary) => {
+    const phase = tripPhase(t).tone
+    return phase === 'ongoing' ? 0 : phase === 'upcoming' ? 1 : 2
+  }
+  return [...list].sort((a, b) => {
+    const ra = rank(a), rb = rank(b)
+    if (ra !== rb) return ra - rb
+    return ra === 2 ? b.start_date.localeCompare(a.start_date) : a.start_date.localeCompare(b.start_date)
+  })
+}
 const qualityLabel = (quality: string) => ({ live: '实时数据', mixed: '混合数据', fallback: '参考计划' }[quality] || '已保存')
 const formatDate = (value: string) => new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric' }).format(new Date(value))
 
@@ -115,4 +143,14 @@ h1 { margin: 10px 0 8px; font-size: clamp(38px, 5vw, 58px); letter-spacing: -2px
 .empty-card a { margin-top: 8px; padding: 10px 18px; border-radius: 9px; color: white; background: #ff6b4a; text-decoration: none; font-weight: 800; }
 @media (max-width: 900px) { .trip-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 620px) { .trips-hero { min-height: 300px; padding-block: 44px; align-items: flex-start; flex-direction: column; } .trip-content { padding-inline: 16px; } .trip-grid { grid-template-columns: 1fr; } .delete-button { opacity: 1; } }
+
+.card-visual.has-photo > span { display: none; }
+.card-visual img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.card-visual.has-photo::after { content: ''; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(20,33,61,.05) 40%, rgba(20,33,61,.55)); }
+.card-visual > span, .quality-dot, .trip-status { position: relative; z-index: 1; }
+.trip-status { position: absolute; top: 14px; left: 14px; z-index: 2; padding: 5px 10px; border-radius: 999px; font-size: 11px; font-weight: 800; }
+.trip-status.ongoing { color: #fff; background: #ff6b4a; box-shadow: 0 3px 10px rgba(255,107,74,.4); }
+.trip-status.upcoming { color: #14532d; background: #d9f7e5; }
+.trip-status.past { color: #e8edf3; background: rgba(20,33,61,.55); }
+.card-city { margin: -12px 0 14px; color: #8792a3; font-size: 12px; }
 </style>

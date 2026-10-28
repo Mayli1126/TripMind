@@ -242,15 +242,28 @@ def apply_plan_patch(
     plan: TripPlan,
     patch: PlanPatch,
     candidates: Optional[Iterable[CandidatePlace]] = None,
+    current_version: Optional[int] = None,
 ) -> Tuple[TripPlan, list[PlanIssue]]:
     """把 PlanPatch 应用到计划副本上。
 
     返回 (新计划, issues)。issues 含 error 时调用方必须丢弃新计划、保留原版本。
     candidates：请求携带的攻略候选，add/replace 按 replacement_candidate_id 直取。
+    current_version：行程库当前版本号（乐观锁）。提供时与 patch.base_version 比对，
+    不等说明行程在编辑期间被别处更新过，拒绝本次修改防覆盖。
     """
     ensure_stable_ids(plan)
     issues: list[PlanIssue] = []
     candidate_map = {c.candidate_id: c for c in (candidates or [])}
+
+    if current_version is not None and patch.base_version != current_version:
+        issues.append(PlanIssue(
+            code="BASE_VERSION_CONFLICT", severity="error",
+            message=(
+                f"行程已在别处更新（当前 v{current_version}，本次修改基于 v{patch.base_version}），"
+                "请刷新后重试"
+            ),
+        ))
+        return plan, issues
 
     # 目标日范围预检
     for idx in patch.affected_day_indexes:

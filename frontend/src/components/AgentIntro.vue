@@ -5,43 +5,43 @@
         <div class="eyebrow"><span class="pulse-dot"></span> AI TRAVEL PLANNER · 可解释旅行规划</div>
         <h1>把一句旅行想法，<br><span>变成真正能出发的行程</span></h1>
         <p class="hero-description">
-          TripMind 协调景点、天气、酒店与交通 Agent，在预算和时间约束下生成计划，
-          再用确定性算法校验费用、优化路线，并清楚标记每一类数据来源。
+          输入目的地和偏好， TripMind 会核对景点、天气、酒店与交通信息，在预算和时间约束内
+          排出能真正出发的行程：每个地点都有真实位置，每笔费用都算得清。
         </p>
         <div class="hero-actions">
           <a href="#planner" class="primary-cta">开始规划 <span>↗</span></a>
           <a href="#how-it-works" class="secondary-cta">了解工作方式 <span>↓</span></a>
         </div>
         <div class="trust-row">
-          <span>✓ 多 Agent 协作</span>
+          <span>✓ 多源信息核对</span>
           <span>✓ 预算可解释</span>
-          <span>✓ 失败不伪装</span>
+          <span>✓ 查不到就明说</span>
         </div>
       </div>
 
-      <div class="agent-visual" aria-label="旅行智能体工作示意图">
+      <div class="agent-visual" aria-label="旅行智能规划工作示意图">
         <div class="visual-glow"></div>
         <div class="orbit orbit-one"></div>
         <div class="orbit orbit-two"></div>
         <div class="agent-core">
           <div class="core-icon">✦</div>
           <strong>TripMind</strong>
-          <small>Planning Agent</small>
+          <small>智能规划</small>
         </div>
-        <div class="agent-node node-poi"><i>⌖</i><span>景点检索</span><small>POI Agent</small></div>
-        <div class="agent-node node-weather"><i>☀</i><span>天气感知</span><small>Weather</small></div>
-        <div class="agent-node node-budget"><i>¥</i><span>预算计算</span><small>Budget</small></div>
-        <div class="agent-node node-route"><i>↝</i><span>路线优化</span><small>Optimizer</small></div>
+        <div class="agent-node node-poi"><i>⌖</i><span>景点检索</span><small>地图核对</small></div>
+        <div class="agent-node node-weather"><i>☀</i><span>天气感知</span><small>天气</small></div>
+        <div class="agent-node node-budget"><i>¥</i><span>预算计算</span><small>预算</small></div>
+        <div class="agent-node node-route"><i>↝</i><span>路线优化</span><small>路线</small></div>
         <div class="route-line line-one"></div>
         <div class="route-line line-two"></div>
       </div>
     </section>
 
     <section class="signal-strip" aria-label="核心能力指标">
-      <div><strong>4</strong><span>类外部信息协同</span></div>
-      <div><strong>2</strong><span>轮最大规划修复</span></div>
-      <div><strong>100%</strong><span>预算由代码复核</span></div>
-      <div><strong>可追溯</strong><span>实时、估算与降级</span></div>
+      <div><strong>4</strong><span>类出行信息一次核对</span></div>
+      <div><strong>30秒</strong><span>平均生成一份行程</span></div>
+      <div><strong>100%</strong><span>费用逐项算得清</span></div>
+      <div><strong>可放心</strong><span>每个地点都在地图上</span></div>
     </section>
 
     <section id="how-it-works" class="capability-section">

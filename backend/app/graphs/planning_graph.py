@@ -20,6 +20,13 @@ from langgraph.types import Command, interrupt
 from ..agents.trip_planner_agent import MultiAgentTripPlanner, get_trip_planner_agent
 from ..models.schemas import TripPlan, TripRequest
 from ..services.candidate_pool_service import apply_candidates_to_plan, render_candidates_for_prompt
+from ..services.day_pipeline_service import (
+    DayPipelineError,
+    build_day_capacities,
+    build_skeleton_prompt,
+    materialize_skeleton,
+    parse_skeleton,
+)
 from ..services.trip_quality_service import trip_quality_service
 from .state import PlanningState
 
@@ -288,13 +295,37 @@ def generate_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
         planner._report_progress(
             callback, 74, "planning", f"将优先安排你确认的 {len(request.candidate_places)} 个攻略候选地点"
         )
-    planner._report_progress(callback, 76, "planning", "Planner 正在编排每日行程")
-    planner_query = _planner_query_with_candidates(planner, request, context)
-    planner_response = planner._run_agent_fresh(planner.planner_agent, planner_query)
-    print(f"行程规划结果: {planner_response[:300]}...\n")
-    planner._report_progress(callback, 86, "validating", "正在校验计划结构与可执行性")
+    # 批2 日编排管线优先：容量(确定性) -> 骨架(LLM 只出名称) -> 物化(候选/高德回填)。
+    # 失败自动回退单次大 JSON 旧路径（含既有桩测试环境），行为兼容。
+    planner_response = ""
+    trip_plan = None
+    try:
+        planner._report_progress(callback, 75, "capacity", "正在计算每日时间容量")
+        capacities = build_day_capacities(request, context.get("transportation_option"))
+        skeleton_prompt = build_skeleton_prompt(
+            request, capacities,
+            context.get("attractions", ""),
+            context.get("hotels", ""),
+        )
+        planner._report_progress(callback, 78, "planning", "Planner 正在编排每日行程骨架")
+        skeleton_raw = planner._run_agent_fresh(planner.planner_agent, skeleton_prompt)
+        # 若后续结构校验仍需修复，至少把原始骨架交给修复器，不能传空字符串。
+        planner_response = skeleton_raw
+        skeletons, overall = parse_skeleton(skeleton_raw, capacities)
+        planner._report_progress(callback, 82, "materializing", "正在用地图数据填充景点坐标")
+        trip_plan = materialize_skeleton(request, skeletons, overall)
+        planner._report_progress(callback, 86, "validating", "正在校验计划结构与可执行性")
+    except DayPipelineError as exc:
+        print(f"⚠️ 日编排管线回退单次生成：{exc}")
+        planner._report_progress(callback, 78, "planning", "正在按整份方式编排行程")
+        trip_plan = None
 
-    trip_plan = planner._parse_response(planner_response, request)
+    if trip_plan is None:
+        planner_query = _planner_query_with_candidates(planner, request, context)
+        planner_response = planner._run_agent_fresh(planner.planner_agent, planner_query)
+        print(f"行程规划结果: {planner_response[:300]}...")
+        planner._report_progress(callback, 86, "validating", "正在校验计划结构与可执行性")
+        trip_plan = planner._parse_response(planner_response, request)
     replan_count = 0
     if planner._needs_repair(trip_plan, request):
         print("🔁 Validator发现结构性问题，执行一次受限重规划...")
@@ -534,6 +565,14 @@ def finalize_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
         intercity_cost_per_person=state.get("intercity_cost_per_person", 0),
         transportation_option=_as_transportation_option(state.get("transportation_option")),
     )
+    # 总体建议：收尾时基于完整行程（含预算/天气/交通约束）重写为多条实用贴士；
+    # 失败保留骨架阶段的两三句话原文，绝不影响主流程出结果
+    try:
+        trip_plan.overall_suggestions = trip_quality_service.refine_overall_suggestions(
+            trip_plan, request
+        )
+    except Exception:
+        pass
     if trip_plan.is_fallback:
         planner._report_progress(
             callback, 97, "degraded", "生成结果不完整，已切换为参考计划并标注原因"

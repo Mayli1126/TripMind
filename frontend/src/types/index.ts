@@ -259,6 +259,8 @@ export interface TripRevisionRequest {
   trip_request: TripFormData
   plan: TripPlan
   instruction: string
+  // 乐观锁：行程库当前版本号；未保存的会话快照场景不传（后端不校验）
+  base_version?: number
 }
 
 export interface TripVersionSummary {
@@ -279,6 +281,8 @@ export interface SavedTripSummary {
   current_version: number
   created_at: string
   updated_at: string
+  // 行程封面图（首个带图景点的图片，无图时前端用城市色兜底）
+  cover_image_url?: string | null
 }
 
 export interface SavedTripDetail extends SavedTripSummary {

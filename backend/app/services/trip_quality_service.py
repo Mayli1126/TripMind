@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import json
 import re
 from ..models.schemas import (
     Budget, DataSource, IntercityJourney, TransportationOption, TripPlan, TripRequest,
@@ -89,7 +90,8 @@ class TripQualityService:
         if request.origin_city.strip() == request.city.strip():
             return None
         if not (request.departure_time and request.arrival_time) and option is None:
-            return existing if existing and existing.source in {"user_confirmed", "live", "static"} else None
+            if existing and existing.source in {"user_confirmed", "live", "static"}:
+                return existing
         mode = request.transportation
         transfer, check_in, after = TripQualityService._journey_buffers(mode)
         confirmed = bool(request.departure_time and request.arrival_time)
@@ -98,7 +100,17 @@ class TripQualityService:
         departure, _ = TripQualityService._parse_transport_time(departure_raw)
         arrival, explicit_offset = TripQualityService._parse_transport_time(arrival_raw)
         if not departure or not arrival:
-            return existing
+            # 未获取到班次时仍必须占用一段保守的跨城时间，不能让首日从早晨
+            # 直接在目的地开始。这里只用于可执行性约束，并明确标为估算值。
+            departure, arrival = {
+                "plane": ("08:00", "11:00"),
+                "high_speed_train": ("08:00", "12:00"),
+                "train": ("08:00", "14:00"),
+                "bus": ("08:00", "14:00"),
+                "自驾": ("08:00", "13:00"),
+                "公共交通": ("08:00", "12:00"),
+            }.get(mode, ("08:00", "12:00"))
+            explicit_offset = 0
         dep_minutes = TripQualityService._minutes(departure)
         arr_minutes = TripQualityService._minutes(arrival)
         arrival_offset = explicit_offset or int(arr_minutes <= dep_minutes)
@@ -188,6 +200,11 @@ class TripQualityService:
         warnings = []
         if request.origin_city != request.city and not plan.intercity_journey:
             warnings.append("未获得可信的去程班次，首日未自动占用跨城交通时间；请填写已购票时刻后重新规划。")
+        elif plan.intercity_journey and plan.intercity_journey.source == "estimated":
+            warnings.append(
+                "未填写或未查到可靠去程班次，首日已按保守参考路程预留时间；"
+                "购票后请补充实际出发和到达时刻。"
+            )
         if request.trip_type == "round_trip" and not plan.return_journey:
             warnings.append("尚未填写返程班次，末日计划未锁定返程时间，请购票后补充。")
         return warnings
@@ -223,9 +240,10 @@ class TripQualityService:
                     closed_moved += 1
                     continue
                 candidate = [*keep, attraction]
-                if (
-                    len(keep) < self._max_attractions(request.pace)
-                    and self._estimated_day_load(plan, day_index, candidate) <= available
+                must_keep_minimum = len(keep) < self._min_attractions(request.pace)
+                if len(keep) < self._max_attractions(request.pace) and (
+                    must_keep_minimum
+                    or self._estimated_day_load(plan, day_index, candidate) <= available
                 ):
                     keep.append(attraction)
                 else:
@@ -312,7 +330,8 @@ class TripQualityService:
                 moves = []
                 target_weekday = datetime.strptime(target_day.date, "%Y-%m-%d").date().weekday()
                 for donor_index, donor_day in enumerate(plan.days):
-                    if donor_index == target_index or len(donor_day.attractions) <= targets[donor_index]:
+                    donor_floor = max(targets[donor_index], self._min_attractions(request.pace))
+                    if donor_index == target_index or len(donor_day.attractions) <= donor_floor:
                         continue
                     for attraction in donor_day.attractions:
                         if target_weekday in attraction.closed_weekdays:
@@ -473,11 +492,7 @@ class TripQualityService:
                 issues.append(f"第 {index + 1} 天的序号不连续。")
             if day.date != expected_date:
                 issues.append(f"第 {index + 1} 天日期应为 {expected_date}，实际为 {day.date}。")
-            arrival_day_without_capacity = (
-                index == 0 and plan.intercity_journey is not None
-                and not day.attractions
-            )
-            if not day.attractions and not arrival_day_without_capacity:
+            if not day.attractions:
                 issues.append(f"第 {index + 1} 天没有可执行的景点安排。")
             elif len(day.attractions) < self._min_attractions(request.pace):
                 issues.append(f"第 {index + 1} 天内容偏少，未达到所选行程节奏的建议数量。")
@@ -543,11 +558,11 @@ class TripQualityService:
 
     @staticmethod
     def _max_attractions(pace: str) -> int:
-        return {"relaxed": 2, "balanced": 3, "intensive": 5}[pace]
+        return {"relaxed": 3, "balanced": 4, "intensive": 5}[pace]
 
     @staticmethod
     def _min_attractions(pace: str) -> int:
-        return {"relaxed": 1, "balanced": 2, "intensive": 3}[pace]
+        return 3
 
     @staticmethod
     def default_sources(is_fallback: bool) -> list[DataSource]:
@@ -574,6 +589,146 @@ class TripQualityService:
                 note="用于组织行程与生成说明，不作为实时事实来源。",
             ),
         ]
+
+
+    # ------------------------------------------------------------------
+    # 总体建议：行程概览页的实用贴士（多条文本，逐行一条）
+    # ------------------------------------------------------------------
+
+    def refine_overall_suggestions(self, plan: TripPlan, request: TripRequest) -> str:
+        """基于完整行程生成 4~6 条出发前贴士；LLM 不可用时规则组装兜底。
+
+        返回换行分隔的多条文本（前端按行渲染编号列表）。
+        骨架阶段的 overall_suggestions 只有两三句话且缺预算/天气上下文，
+        这里在 finalize 收尾时用完整行程重写。
+        """
+        context = self._suggestions_context(plan, request)
+        prompt = (
+            "你是旅行顾问。根据下面这份已完成的行程，写 4~6 条出发前的实用贴士。\n"
+            "要求：\n"
+            "- 每条一句话、不超过 40 字，具体可执行（穿衣、天气、购票预约、避峰、交通、预算、体力）\n"
+            "- 优先提示天气风险、跨城交通出发时间、热门景点预约、预算超支\n"
+            "- 不要出现“祝您旅途愉快”之类的空话，不要罗列行程\n"
+            "- 只输出 JSON 数组，例如 [\"贴士一\", \"贴士二\"]\n\n"
+            f"行程摘要：\n{context}"
+        )
+        try:
+            raw = _get_suggestions_llm().invoke([{"role": "user", "content": prompt}])
+            items = self._parse_suggestions(raw)
+            if len(items) >= 3:
+                return "\n".join(items[:6])
+        except Exception:
+            pass
+        return self._rule_based_suggestions(plan, request)
+
+    @staticmethod
+    def _parse_suggestions(raw: str) -> list[str]:
+        """从 LLM 输出中提取字符串数组（容忍 ```json 包裹与前后杂文本）。"""
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        if not match:
+            return []
+        try:
+            data = json.loads(match.group(0))
+        except ValueError:
+            return []
+        if not isinstance(data, list):
+            return []
+        return [str(item).strip() for item in data if str(item).strip()][:8]
+
+    @staticmethod
+    def _suggestions_context(plan: TripPlan, request: TripRequest) -> str:
+        """渲染给贴士模型的行程摘要：只留事实，不塞完整 JSON。"""
+        lines = [
+            f"目的地 {plan.city}，{plan.start_date} 至 {plan.end_date} 共 {len(plan.days)} 天",
+            f"出发城市：{request.origin_city}",
+        ]
+        for day in plan.days:
+            names = "、".join(a.name for a in day.attractions[:8])
+            lines.append(
+                f"第{day.day_index + 1}天「{day.theme or day.description}」：{names}；市内交通{day.transportation}"
+            )
+        for w in plan.weather_info:
+            lines.append(
+                f"天气 {w.date}：白天{w.day_weather}{w.day_temp}°C，夜间{w.night_temp}°C，{w.wind_direction}风{w.wind_power}"
+            )
+        if plan.budget:
+            over = "，已超预算" if plan.budget.over_budget else ""
+            lines.append(f"预算：总 {plan.budget.total} 元，人均 {plan.budget.per_person} 元{over}")
+        if plan.intercity_journey:
+            j = plan.intercity_journey
+            lines.append(
+                f"首日跨城：{j.name} {j.departure_time} 从{j.departure_station}出发，需提前{j.station_transfer_minutes}分钟到站"
+            )
+        for warning in plan.warnings[:5]:
+            lines.append(f"提醒：{warning}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _rule_based_suggestions(plan: TripPlan, request: TripRequest) -> str:
+        """LLM 失败时的规则兜底：从天气/交通/预算/门票里能提炼多少提多少。"""
+        tips: list[str] = []
+        rainy = [w.date for w in plan.weather_info if "雨" in (w.day_weather or "")]
+        if rainy:
+            tips.append(f"{'、'.join(rainy[:3])} 有降雨，随身带伞")
+
+        def _max_wind(power: str) -> int:
+            numbers = [int(x) for x in re.findall(r"\d+", power or "")]
+            return max(numbers) if numbers else 0
+
+        gusts = [w for w in plan.weather_info if _max_wind(w.wind_power) >= 5]
+        if gusts:
+            tips.append(f"{'、'.join(w.date for w in gusts[:3])} 风力较大，注意防风保暖")
+        temps = [
+            (w.day_temp, w.night_temp)
+            for w in plan.weather_info
+            if w.day_temp is not None and w.night_temp is not None
+        ]
+        if temps and max(t[0] for t in temps) - min(t[1] for t in temps) >= 10:
+            tips.append("行程内早晚温差超过 10°C，备一件方便穿脱的外套")
+        if plan.intercity_journey:
+            j = plan.intercity_journey
+            tips.append(
+                f"首日 {j.departure_time} 的{j.name}从{j.departure_station}出发，提前 {j.station_transfer_minutes} 分钟到站"
+            )
+        if plan.budget and plan.budget.over_budget:
+            tips.append("当前安排略超预算，可减少收费景点或改住经济型酒店")
+        paid = [
+            a.name
+            for day in plan.days
+            for a in day.attractions
+            if a.ticket_price and "免费" not in str(a.ticket_price)
+        ]
+        if paid:
+            tips.append(f"{'、'.join(paid[:2])} 为收费景点，建议提前在线购票免排队")
+        if sum(len(day.attractions) for day in plan.days) >= 12:
+            tips.append("行程较满，建议每天保留半小时以上弹性时间")
+        if not tips:
+            tips.append("出发前请再确认各景点开放时间与预约要求")
+        return "\n".join(tips[:6])
+
+
+# 贴士生成专用客户端：优先 LLM_PATCH_MODEL（flash 级小模型），未配置回退主模型；进程级缓存
+_suggestions_llm = None
+
+
+def _get_suggestions_llm():
+    global _suggestions_llm
+    if _suggestions_llm is None:
+        import os
+
+        if (os.getenv("LLM_PATCH_MODEL") or "").strip():
+            from ..infrastructure.llm_client import LLMClient
+
+            _suggestions_llm = LLMClient(
+                model=os.getenv("LLM_PATCH_MODEL").strip(),
+                temperature=1.0,
+                max_tokens=1024,
+            )
+        else:
+            from .llm_service import get_llm
+
+            _suggestions_llm = get_llm()
+    return _suggestions_llm
 
 
 trip_quality_service = TripQualityService()

@@ -601,7 +601,7 @@ class MultiAgentTripPlanner:
 {hotels}{transport_text}
 
 **要求:**
-1. 每天景点数量遵循行程节奏：轻松1-2个、适中2-3个、紧凑3-5个；当前为{request.pace}
+1. 每天至少安排3个景区或游玩打卡点；时间紧张时选择同片区、短时长地点，当前节奏为{request.pace}
 2. 每天必须包含早中晚三餐
 3. 每天推荐一个具体的酒店(从酒店信息中选择)
 4. 第一天必须先安排跨城交通、进站/值机缓冲和抵达接驳，景点只能使用抵达后的剩余时间
@@ -633,17 +633,6 @@ class MultiAgentTripPlanner:
             f"poi:{item.poi_id}" if item.poi_id else f"name:{''.join(item.name.lower().split())}"
             for day in plan.days for item in day.attractions
         ]
-        categories = {
-            (item.category or "").strip().lower()
-            for day in plan.days for item in day.attractions
-            if (item.category or "").strip()
-        }
-        main_meals = [
-            meal.name.strip().lower()
-            for day in plan.days for meal in day.meals
-            if meal.type in {"lunch", "dinner"} and meal.name.strip()
-        ]
-        minimum_categories = min(3, len(attraction_keys))
         return (
             plan.is_fallback
             or len(plan.days) != request.travel_days
@@ -652,13 +641,11 @@ class MultiAgentTripPlanner:
             or any(not day.attractions for day in plan.days)
             or any(len(day.attractions) < self._minimum_attractions(request.pace) for day in plan.days)
             or len(attraction_keys) != len(set(attraction_keys))
-            or len(categories) < minimum_categories
-            or len(main_meals) != len(set(main_meals))
         )
 
     @staticmethod
     def _minimum_attractions(pace: str) -> int:
-        return {"relaxed": 1, "balanced": 2, "intensive": 3}[pace]
+        return 3
 
     def _repair_plan(self, request: TripRequest, previous_response: str) -> TripPlan:
         repair_prompt = f"""上一版旅行计划未通过结构校验。请修复后只返回完整JSON，不要解释。
@@ -667,7 +654,9 @@ class MultiAgentTripPlanner:
 - 城市：{request.city}
 - 日期：{request.start_date} 至 {request.end_date}，共{request.travel_days}天
 - days必须恰好包含{request.travel_days}项，day_index从0连续递增
-- 每天至少1个景点，并包含breakfast、lunch、dinner三餐
+- 每天至少3个景区或游玩打卡点，并包含breakfast、lunch、dinner三餐
+- 首日必须先扣除跨城交通和抵达接驳；不得出现从出发城市早上出发、一小时后已在异地景点游玩的情况
+- 首日时间紧张时，使用同片区、30-90分钟的轻量打卡点凑足3个，不要伪造不可能的精确时间
 - 所有日期的景点全局去重，同一POI或同名景点只能出现一次
 - 每天使用不同主题，至少覆盖历史文化、自然/城市风光、休闲体验或当地美食中的多个类别
 - 午餐和晚餐不要跨天重复同一家餐厅

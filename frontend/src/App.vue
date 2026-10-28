@@ -4,18 +4,16 @@
     <header class="app-header">
       <router-link to="/" class="brand" aria-label="TripMind 首页">
         <span class="brand-mark">T</span>
-        <span class="brand-text"><strong>TripMind</strong><small>AI Travel Agent</small></span>
+        <span class="brand-text"><strong>TripMind</strong><small>智能旅行规划</small></span>
       </router-link>
 
       <nav class="main-nav" aria-label="主导航">
         <router-link to="/">首页</router-link>
         <router-link to="/guide">攻略导入</router-link>
         <router-link to="/trips">我的行程</router-link>
-        <a href="/#how-it-works">能力</a>
         <a href="/#planner">开始规划</a>
       </nav>
 
-      <div class="header-status"><span></span> Agent Ready</div>
     </header>
 
     <main class="app-main"><router-view /></main>
@@ -25,7 +23,7 @@
         <span class="footer-brand">TripMind</span>
         <span>让旅行计划有依据，也有温度。</span>
       </div>
-      <div class="footer-meta">Multi-Agent · Evidence-aware · Route Optimized</div>
+      <div class="footer-meta">每个地点都在地图上核对 · 每笔费用都算得清</div>
     </footer>
   </div>
   </a-config-provider>

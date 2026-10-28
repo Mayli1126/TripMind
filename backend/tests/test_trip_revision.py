@@ -51,6 +51,14 @@ class TripRevisionTests(TestCase):
                     description="测试",
                     category="城市公园",
                     ticket_price=2,
+                ), Attraction(
+                    name="北海公园",
+                    address="北京",
+                    location=Location(longitude=116.389, latitude=39.925),
+                    visit_duration=60,
+                    description="测试",
+                    category="城市公园",
+                    ticket_price=10,
                 )],
                 meals=[
                     Meal(type=meal_type, name=meal_type, estimated_cost=20)

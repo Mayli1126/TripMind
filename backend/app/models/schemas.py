@@ -512,6 +512,10 @@ class TripRevisionRequest(BaseModel):
     trip_request: TripRequest
     plan: TripPlan
     instruction: str = Field(..., min_length=2, max_length=1000)
+    # 乐观锁：行程库当前版本号。提供时 Patch 的 base_version 必须与之相等，
+    # 不等说明行程在用户编辑期间被别处更新过，拒绝本次修改防覆盖；
+    # None（未保存的会话快照场景）不做版本校验
+    base_version: Optional[int] = Field(default=None, ge=1, description="当前行程库版本号，乐观锁校验用")
 
 
 # ============ 个人行程库 ============
@@ -547,6 +551,8 @@ class SavedTripSummary(BaseModel):
     estimated_budget: Optional[int] = None
     data_quality: str
     current_version: int
+    # 行程封面：第一个带图片的景点图（列表页卡片封面用，无图时前端用城市色兜底）
+    cover_image_url: Optional[str] = None
     created_at: str
     updated_at: str
 

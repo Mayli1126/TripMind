@@ -75,7 +75,8 @@ async function createRevisionJob(request: TripRevisionRequest): Promise<Planning
   return response.data
 }
 
-async function getPlanningJob(jobId: string): Promise<PlanningJobResponse> {
+// 查询任务状态（含 waiting_input 载荷）——恢复监听与决策卡片拉详情共用
+export async function getPlanningJob(jobId: string): Promise<PlanningJobResponse> {
   const response = await apiClient.get<PlanningJobResponse>(`/api/trip/jobs/${jobId}`)
   return response.data
 }
@@ -181,15 +182,27 @@ function waitForPlanningJob(
   return promise
 }
 
+// 恢复监听一个已存在的任务（页面刷新后接续进度/等待确认/完成事件），
+// SSE 自动携带 Last-Event-ID 续传，不重算后端任何步骤
+export function waitForExistingJob(
+  jobId: string,
+  onProgress: (event: PlanningProgressEvent) => void,
+  onWaitingInput?: (jobId: string, payload: WaitingInputPayload) => void
+): Promise<TripPlan> & { cancel: () => void } {
+  return waitForPlanningJob(jobId, onProgress, onWaitingInput)
+}
+
 export function generateTripPlanWithProgress(
   formData: TripFormData,
   onProgress: (event: PlanningProgressEvent) => void,
-  onWaitingInput?: (jobId: string, payload: WaitingInputPayload) => void
+  onWaitingInput?: (jobId: string, payload: WaitingInputPayload) => void,
+  onJobCreated?: (jobId: string) => void
 ): Promise<TripPlan> & { cancel: () => void } {
   // 任务 ID 创建后才建立 SSE 监听；cancel 需穿透到最终连接
   let cancelInner: (() => void) | null = null
   const promise = createPlanningJob(formData)
     .then((job) => {
+      onJobCreated?.(job.job_id)  // 供前端记录 active_job，页面刷新后可恢复监听
       const waiter = waitForPlanningJob(job.job_id, onProgress, onWaitingInput)
       cancelInner = waiter.cancel
       return waiter
@@ -337,6 +350,14 @@ export async function retryGuideSource(sourceId: string): Promise<GuideSourceRec
 // 删除攻略及其候选与事实
 export async function deleteGuideSource(sourceId: string): Promise<void> {
   await apiClient.delete(`/api/guide-sources/${sourceId}`)
+}
+
+// 候选四档选择回写服务端（user_choice 跨设备一致）
+export async function updateCandidateChoices(
+  sourceId: string,
+  choices: Record<string, string>
+): Promise<void> {
+  await apiClient.patch(`/api/guide-sources/${sourceId}/candidates/choices`, { choices })
 }
 
 // 跨来源聚合候选池（候选云端化）：后端已按 poi_id 合并去重

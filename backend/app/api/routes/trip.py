@@ -66,6 +66,7 @@ async def create_revision_job(request: TripRevisionRequest, raw_request: Request
         request.trip_request,
         request.plan,
         request.instruction,
+        base_version=request.base_version,
     )
 
 

@@ -130,6 +130,16 @@ class CandidatePool:
         target.recommendation_reasons = union(target.recommendation_reasons, incoming.recommendation_reasons)
         target.warnings = union(target.warnings, incoming.warnings)
         target.confidence = max(target.confidence, incoming.confidence)
+        # 事实冲突处理（7.2 节）：多篇攻略建议时长不同时保留矛盾、不猜答案，
+        # 明确告诉用户"以最终行程为准"
+        if (
+            incoming.suggested_duration_minutes != target.suggested_duration_minutes
+            and f"建议时长 {target.suggested_duration_minutes} 分钟" not in " ".join(target.warnings)
+        ):
+            target.warnings.append(
+                f"多篇攻略建议时长不一致（{target.suggested_duration_minutes} 分钟 / "
+                f"{incoming.suggested_duration_minutes} 分钟），最终以行程安排为准"
+            )
         # 被合并方的名称沉淀为别名，确认界面可见"也叫：XX"
         if incoming.canonical_name != target.canonical_name:
             target.aliases = union(target.aliases, [incoming.canonical_name])

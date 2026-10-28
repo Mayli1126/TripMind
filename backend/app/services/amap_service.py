@@ -1,16 +1,147 @@
 """高德地图MCP服务封装"""
 
+from collections import OrderedDict
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
 from ..config import get_settings
 from ..models.schemas import Location, POIInfo, WeatherInfo, TransportationOption
 import json
+import random
 import re
+import threading
+import time
+
+import requests
 
 if TYPE_CHECKING:
     from ..infrastructure.mcp_client import MCPToolAdapter
 
 # 全局MCP工具实例
 _amap_mcp_tool = None
+
+# POI coordinates are effectively static.  Keep a fast process-local cache and,
+# when Redis is enabled, a shared second-level cache.  The third-party Amap MCP
+# wrapper intentionally drops ``location`` from text-search results, so the
+# normal production path below calls the same official endpoint directly and
+# avoids a second detail request for every POI.
+_POI_CACHE_TTL_SECONDS = 7 * 24 * 3600
+_POI_MEMORY_CACHE_SIZE = 2048
+_POI_MEMORY_CACHE: "OrderedDict[str, tuple[float, list[dict[str, Any]]]]" = OrderedDict()
+_POI_CACHE_LOCK = threading.Lock()
+_POI_INFLIGHT: dict[str, threading.Event] = {}
+
+# The observed developer-key quota rejects a burst of four concurrent calls.
+# Spacing only the inexpensive POI HTTP calls prevents bursts while the rest of
+# the planning graph (LLM, weather, transport) remains fully concurrent.
+_AMAP_POI_MIN_INTERVAL_SECONDS = 0.28
+_AMAP_RATE_LOCK = threading.Lock()
+_AMAP_NEXT_REQUEST_AT = 0.0
+
+
+class AmapRateLimitError(RuntimeError):
+    """Raised after the short local retry budget for an Amap QPS error."""
+
+
+def _normalise_cache_part(value: str) -> str:
+    return re.sub(r"\s+", "", value.strip().lower())
+
+
+def _poi_cache_key(keywords: str, city: str, citylimit: bool) -> str:
+    return (
+        f"amap:poi:v2:{_normalise_cache_part(city)}:"
+        f"{_normalise_cache_part(keywords)}:{int(citylimit)}"
+    )
+
+
+def _poi_around_cache_key(
+    keywords: str, location: Location, radius: int
+) -> str:
+    return (
+        f"amap:around:v2:{location.longitude:.5f}:{location.latitude:.5f}:"
+        f"{int(radius)}:{_normalise_cache_part(keywords)}"
+    )
+
+
+def _serialise_pois(pois: List[POIInfo]) -> list[dict[str, Any]]:
+    return [poi.model_dump(mode="json") for poi in pois]
+
+
+def _deserialise_pois(items: Any) -> List[POIInfo]:
+    if not isinstance(items, list):
+        return []
+    pois: List[POIInfo] = []
+    for item in items:
+        try:
+            pois.append(POIInfo.model_validate(item))
+        except Exception:
+            continue
+    return pois
+
+
+def _poi_cache_read(cache_key: str) -> List[POIInfo]:
+    now = time.monotonic()
+    with _POI_CACHE_LOCK:
+        cached = _POI_MEMORY_CACHE.get(cache_key)
+        if cached is not None:
+            expires_at, items = cached
+            if expires_at > now:
+                _POI_MEMORY_CACHE.move_to_end(cache_key)
+                return _deserialise_pois(items)
+            _POI_MEMORY_CACHE.pop(cache_key, None)
+
+    if not get_settings().redis_enabled:
+        return []
+    try:
+        from ..infrastructure import redis_client
+
+        raw = redis_client.cache_get(cache_key)
+        if not raw:
+            return []
+        items = json.loads(raw)
+        pois = _deserialise_pois(items)
+        if pois:
+            _poi_cache_write_memory(cache_key, pois)
+        return pois
+    except Exception:
+        return []
+
+
+def _poi_cache_write_memory(cache_key: str, pois: List[POIInfo]) -> None:
+    items = _serialise_pois(pois)
+    with _POI_CACHE_LOCK:
+        _POI_MEMORY_CACHE[cache_key] = (
+            time.monotonic() + _POI_CACHE_TTL_SECONDS,
+            items,
+        )
+        _POI_MEMORY_CACHE.move_to_end(cache_key)
+        while len(_POI_MEMORY_CACHE) > _POI_MEMORY_CACHE_SIZE:
+            _POI_MEMORY_CACHE.popitem(last=False)
+
+
+def _poi_cache_write(cache_key: str, pois: List[POIInfo]) -> None:
+    _poi_cache_write_memory(cache_key, pois)
+    if not get_settings().redis_enabled:
+        return
+    try:
+        from ..infrastructure import redis_client
+
+        redis_client.cache_set(
+            cache_key,
+            json.dumps(_serialise_pois(pois), ensure_ascii=False),
+            _POI_CACHE_TTL_SECONDS,
+        )
+    except Exception:
+        pass
+
+
+def _wait_for_amap_poi_slot() -> None:
+    """Space POI calls globally without serialising non-Amap planning work."""
+    global _AMAP_NEXT_REQUEST_AT
+    with _AMAP_RATE_LOCK:
+        now = time.monotonic()
+        delay = max(0.0, _AMAP_NEXT_REQUEST_AT - now)
+        _AMAP_NEXT_REQUEST_AT = max(now, _AMAP_NEXT_REQUEST_AT) + _AMAP_POI_MIN_INTERVAL_SECONDS
+    if delay:
+        time.sleep(delay)
 
 
 def _decode_mcp_payload(raw: Any) -> Any:
@@ -105,7 +236,23 @@ class AmapService:
 
     def __init__(self, mcp_tool: Optional["MCPToolAdapter"] = None):
         """初始化服务；并行任务可注入独占 MCP 连接。"""
-        self.mcp_tool = mcp_tool or get_amap_mcp_tool()
+        # Injected tools are used by tests and specialised callers.  Keep their
+        # MCP parsing path intact; normal application instances use the direct
+        # one-call POI path below.
+        self._prefer_direct_poi_search = mcp_tool is None
+        self._mcp_tool = mcp_tool
+
+    @property
+    def mcp_tool(self) -> "MCPToolAdapter":
+        """Initialise the MCP manager only when a non-POI operation needs it."""
+        if self._mcp_tool is None:
+            self._mcp_tool = get_amap_mcp_tool()
+        return self._mcp_tool
+
+    @mcp_tool.setter
+    def mcp_tool(self, value: "MCPToolAdapter") -> None:
+        # Kept for test fakes and existing callers that replace the adapter.
+        self._mcp_tool = value
     
     def search_poi(self, keywords: str, city: str, citylimit: bool = True) -> List[POIInfo]:
         """
@@ -119,6 +266,9 @@ class AmapService:
         Returns:
             POI信息列表
         """
+        if getattr(self, "_prefer_direct_poi_search", False):
+            return self._search_poi_cached_direct(keywords, city, citylimit)
+
         try:
             # 调用MCP工具
             result = self.mcp_tool.run({
@@ -192,6 +342,141 @@ class AmapService:
             print(f"❌ POI搜索失败: {str(e)}")
             raise RuntimeError(f"POI搜索失败: {e}") from e
 
+    def _search_poi_cached_direct(
+        self,
+        keywords: str,
+        city: str,
+        citylimit: bool,
+        location: Optional[Location] = None,
+        radius: int = 2000,
+    ) -> List[POIInfo]:
+        """One-call official POI search with L1/L2 cache and single-flight."""
+        cache_key = (
+            _poi_around_cache_key(keywords, location, radius)
+            if location is not None
+            else _poi_cache_key(keywords, city, citylimit)
+        )
+        cached = _poi_cache_read(cache_key)
+        if cached:
+            return cached
+
+        owner = False
+        with _POI_CACHE_LOCK:
+            event = _POI_INFLIGHT.get(cache_key)
+            if event is None:
+                event = threading.Event()
+                _POI_INFLIGHT[cache_key] = event
+                owner = True
+
+        if not owner:
+            # A duplicate query shares the first caller's result rather than
+            # consuming another unit of Amap quota.
+            event.wait(timeout=20.0)
+            cached = _poi_cache_read(cache_key)
+            if cached:
+                return cached
+
+        try:
+            pois = self._search_poi_direct(
+                keywords, city, citylimit, location=location, radius=radius
+            )
+            _poi_cache_write(cache_key, pois)
+            return pois
+        finally:
+            if owner:
+                with _POI_CACHE_LOCK:
+                    finished = _POI_INFLIGHT.pop(cache_key, None)
+                if finished is not None:
+                    finished.set()
+
+    def _search_poi_direct(
+        self,
+        keywords: str,
+        city: str,
+        citylimit: bool,
+        location: Optional[Location] = None,
+        radius: int = 2000,
+    ) -> List[POIInfo]:
+        """Call Amap's official text-search endpoint and retain ``location``.
+
+        ``amap-mcp-server`` currently removes that field, which otherwise
+        forces a second detail request and doubles the QPS pressure.
+        """
+        settings = get_settings()
+        last_limit_message = "CUQPS_HAS_EXCEEDED_THE_LIMIT"
+        if location is not None:
+            endpoint = "https://restapi.amap.com/v3/place/around"
+            params = {
+                "key": settings.amap_api_key,
+                "keywords": keywords,
+                "location": f"{location.longitude},{location.latitude}",
+                "radius": str(radius),
+                "offset": 20,
+                "page": 1,
+                "extensions": "all",
+            }
+        else:
+            endpoint = "https://restapi.amap.com/v3/place/text"
+            params = {
+                "key": settings.amap_api_key,
+                "keywords": keywords,
+                "city": city,
+                "citylimit": str(citylimit).lower(),
+                "offset": 20,
+                "page": 1,
+                "extensions": "all",
+            }
+        for attempt in range(3):
+            _wait_for_amap_poi_slot()
+            try:
+                response = requests.get(
+                    endpoint,
+                    params=params,
+                    timeout=12,
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except (requests.RequestException, ValueError) as exc:
+                if attempt < 2:
+                    time.sleep((0.18 * (2 ** attempt)) + random.uniform(0.02, 0.08))
+                    continue
+                raise RuntimeError(f"高德 POI 请求失败: {exc}") from exc
+
+            if str(payload.get("status")) != "1":
+                message = str(payload.get("info") or payload.get("infocode") or "未知错误")
+                if "QPS" in message.upper() or "LIMIT" in message.upper():
+                    last_limit_message = message
+                    if attempt < 2:
+                        time.sleep((0.2 * (2 ** attempt)) + random.uniform(0.03, 0.1))
+                        continue
+                    raise AmapRateLimitError(
+                        f"高德 POI 查询触发频率限制: {message}"
+                    )
+                raise RuntimeError(f"高德 POI 查询失败: {message}")
+
+            pois: List[POIInfo] = []
+            for item in payload.get("pois") or []:
+                if not isinstance(item, dict) or not item.get("name"):
+                    continue
+                location = _parse_location(item.get("location"))
+                if location is None:
+                    continue
+                pois.append(POIInfo(
+                    id=str(item.get("id", "")),
+                    name=str(item["name"]),
+                    type=str(item.get("type", item.get("typecode", ""))),
+                    address=str(item.get("address", "")),
+                    location=location,
+                    tel=str(item["tel"]) if item.get("tel") else None,
+                ))
+            if not pois:
+                raise ValueError(
+                    f"高德未返回带坐标的 POI（关键词={keywords}，城市={city}）"
+                )
+            return pois
+
+        raise AmapRateLimitError(f"高德 POI 查询触发频率限制: {last_limit_message}")
+
     def _fetch_poi_detail(self, poi_id: str) -> Optional[dict]:
         """maps_text_search 不返回坐标时，按 poi_id 调详情接口补 location 等字段。
 
@@ -206,6 +491,14 @@ class AmapService:
                 "arguments": {"id": poi_id},
             })
             detail_ = _decode_mcp_payload(result)
+            if isinstance(detail_, dict) and detail_.get("error"):
+                message = str(detail_["error"])
+                if "QPS" in message.upper() or "LIMIT" in message.upper():
+                    raise AmapRateLimitError(
+                        f"高德 POI 详情查询触发频率限制: {message}"
+                    )
+                print(f"⚠️ 高德 POI 详情返回错误（poi_id={poi_id}）: {message}")
+                return None
             # 顶层直接是 POI 对象
             if isinstance(detail_, dict) and detail_.get("name"):
                 return detail_
@@ -214,6 +507,8 @@ class AmapService:
                 if isinstance(item, dict)
             ]
             return items[0] if items else None
+        except AmapRateLimitError:
+            raise
         except Exception as exc:
             print(f"⚠️ POI 详情获取失败（poi_id={poi_id}）: {exc}")
             return None
@@ -404,6 +699,19 @@ class AmapService:
         Returns:
             POI信息列表
         """
+        if getattr(self, "_prefer_direct_poi_search", False):
+            try:
+                return self._search_poi_cached_direct(
+                    keywords,
+                    city,
+                    True,
+                    location=location,
+                    radius=radius,
+                )
+            except Exception as exc:
+                print(f"❌ 餐厅搜索失败: {exc}")
+                return []
+
         try:
             arguments = {
                 "keywords": keywords,

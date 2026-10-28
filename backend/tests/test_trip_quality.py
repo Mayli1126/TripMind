@@ -13,7 +13,7 @@ from app.models.schemas import (
     TripRequest,
     get_app_today,
 )
-from app.services.trip_quality_service import TripQualityService
+from app.services.trip_quality_service import TripQualityService, trip_quality_service
 
 
 def make_request(**overrides) -> TripRequest:
@@ -156,7 +156,7 @@ class TripQualityServiceTests(TestCase):
         }
 
     def test_timeline_is_chronological_and_contains_break_buffer(self):
-        request = make_request()
+        request = make_request(origin_city="北京", city="北京")
         plan = TripPlan(
             city="北京",
             start_date=request.start_date,
@@ -171,6 +171,28 @@ class TripQualityServiceTests(TestCase):
         assert all(left.end_time <= right.start_time for left, right in zip(schedule, schedule[1:]))
         assert any(item.item_type == "break" for item in schedule)
         assert schedule[0].start_time == "07:45"
+
+    def test_unknown_route_uses_estimated_journey_before_sightseeing(self):
+        request = make_request(origin_city="武汉", city="陌生目的地")
+        day0 = make_day(0, 10)
+        day0.attractions = [
+            day0.attractions[0].model_copy(update={"name": f"打卡点{i}", "visit_duration": 45})
+            for i in range(3)
+        ]
+        plan = TripPlan(
+            city=request.city, start_date=request.start_date, end_date=request.end_date,
+            days=[day0, make_day(1, 20)], overall_suggestions="测试",
+        )
+
+        result = TripQualityService().finalize(plan, request, bind_meals=False)
+
+        self.assertIsNotNone(result.intercity_journey)
+        self.assertEqual(result.intercity_journey.source, "estimated")
+        self.assertEqual(result.intercity_journey.arrival_time, "12:00")
+        attraction_slots = [item for item in result.days[0].schedule if item.item_type == "attraction"]
+        self.assertTrue(attraction_slots)
+        self.assertTrue(all(item.start_time >= "12:45" for item in attraction_slots))
+        self.assertGreaterEqual(len(result.days[0].attractions), 3)
 
     def test_first_day_sightseeing_starts_after_confirmed_intercity_arrival(self):
         request = make_request(departure_time="09:00", arrival_time="15:00")
@@ -262,14 +284,15 @@ class TripQualityServiceTests(TestCase):
             day.hotel.location = Location(longitude=116.4, latitude=39.9)
         days[0].attractions = [
             Attraction(name=f"A{i}", address="测试", location=Location(longitude=116.40 + i * .01, latitude=39.9), visit_duration=90, description="测试")
-            for i in range(3)
+            for i in range(4)
         ]
         days[1].attractions = [
             Attraction(name=f"B{i}", address="测试", location=Location(longitude=116.50 + i * .01, latitude=39.9), visit_duration=90, description="测试")
             for i in range(3)
         ]
         days[2].attractions = [
-            Attraction(name="C0", address="测试", location=Location(longitude=116.60, latitude=39.9), visit_duration=90, description="测试")
+            Attraction(name=f"C{i}", address="测试", location=Location(longitude=116.60 + i * .01, latitude=39.9), visit_duration=90, description="测试")
+            for i in range(2)
         ]
         plan = TripPlan(
             city="北京", start_date=request.start_date, end_date=request.end_date,
@@ -278,8 +301,8 @@ class TripQualityServiceTests(TestCase):
 
         result = TripQualityService().finalize(plan, request)
 
-        self.assertEqual(sum(len(day.attractions) for day in result.days), 7)
-        self.assertGreaterEqual(len(result.days[-1].attractions), 2)
+        self.assertEqual(sum(len(day.attractions) for day in result.days), 9)
+        self.assertGreaterEqual(len(result.days[-1].attractions), 3)
         self.assertLessEqual(max(len(day.attractions) for day in result.days) - min(len(day.attractions) for day in result.days), 1)
         self.assertTrue(any("重新分配" in warning for warning in result.warnings))
 
@@ -310,3 +333,73 @@ class TripQualityServiceTests(TestCase):
         self.assertEqual(len(commute_steps), 2)
         self.assertNotEqual(commute_steps[0], commute_steps[1])
         self.assertEqual(result.days[0].route_summary.start_anchor, "测试酒店")
+
+
+class OverallSuggestionsTests(TestCase):
+    """总体建议：finalize 收尾时重写为多条实用贴士（概览页编号列表的数据源）。"""
+
+    def _plan_with_rain(self) -> TripPlan:
+        from app.models.schemas import WeatherInfo
+
+        request = make_request()
+        plan = TripPlan(
+            city="北京",
+            start_date=request.start_date,
+            end_date=request.end_date,
+            days=[make_day(0, 60), make_day(1, 0)],
+            overall_suggestions="这是为您规划的北京2日游行程。",
+            weather_info=[
+                WeatherInfo(
+                    date=request.start_date,
+                    day_weather="小雨",
+                    night_weather="阴",
+                    day_temp=18,
+                    night_temp=8,
+                    wind_direction="东北风",
+                    wind_power="5-6级",
+                )
+            ],
+        )
+        return plan
+
+    def test_llm_suggestions_win(self):
+        from unittest import mock
+
+        plan = self._plan_with_rain()
+        raw = '["行程首日有雨，带好雨具", "早晚温差大，备一件外套", "景点门票建议提前购买"]'
+        with mock.patch.object(
+            TripQualityService, "_rule_based_suggestions", return_value="兜底"
+        ) as fallback, mock.patch(
+            "app.services.trip_quality_service._get_suggestions_llm"
+        ) as llm_factory:
+            llm_factory.return_value.invoke.return_value = raw
+            result = trip_quality_service.refine_overall_suggestions(plan, make_request())
+        self.assertEqual(result.split("\n")[0], "行程首日有雨，带好雨具")
+        self.assertEqual(len(result.split("\n")), 3)
+        fallback.assert_not_called()
+
+    def test_llm_failure_falls_back_to_rules(self):
+        from unittest import mock
+
+        plan = self._plan_with_rain()
+        with mock.patch(
+            "app.services.trip_quality_service._get_suggestions_llm"
+        ) as llm_factory:
+            llm_factory.return_value.invoke.side_effect = RuntimeError("网络错误")
+            result = trip_quality_service.refine_overall_suggestions(plan, make_request())
+        tips = result.split("\n")
+        self.assertTrue(any("降雨" in tip for tip in tips))
+        self.assertTrue(any("风力较大" in tip for tip in tips))
+        self.assertTrue(any("温差" in tip for tip in tips))
+        self.assertTrue(any("收费景点" in tip for tip in tips))
+
+    def test_llm_garbage_output_falls_back(self):
+        from unittest import mock
+
+        plan = self._plan_with_rain()
+        with mock.patch(
+            "app.services.trip_quality_service._get_suggestions_llm"
+        ) as llm_factory:
+            llm_factory.return_value.invoke.return_value = "抱歉我无法完成这个任务"
+            result = trip_quality_service.refine_overall_suggestions(plan, make_request())
+        self.assertIn("降雨", result)

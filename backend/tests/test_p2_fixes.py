@@ -2,6 +2,7 @@
 
 import json
 from datetime import date, timedelta
+from pathlib import Path
 from unittest import mock
 from unittest import TestCase
 
@@ -169,3 +170,110 @@ class MealBindingTestCase(TestCase):
 if __name__ == "__main__":
     import unittest
     unittest.main()
+
+class OptimisticLockTestCase(TestCase):
+    """PlanPatch 乐观锁：base_version 与行程库版本不一致时拒绝修改。"""
+
+    def _plan(self):
+        return TripPlan(
+            city="北京", start_date="2026-12-01", end_date="2026-12-01",
+            days=[DayPlan(
+                date="2026-12-01", day_index=0, description="d", transportation="地铁",
+                accommodation="酒店",
+                attractions=[Attraction(
+                    name="故宫", address="a", location=Location(longitude=116.4, latitude=39.9),
+                    visit_duration=90, description="",
+                )],
+                meals=[Meal(type="breakfast", name="早"), Meal(type="lunch", name="午"), Meal(type="dinner", name="晚")],
+            )],
+            overall_suggestions="s",
+        )
+
+    def _patch(self, base_version=1):
+        from app.models.patch import PatchOperation, PlanPatch
+        return PlanPatch(
+            base_version=base_version,
+            operations=[PatchOperation(op="change_pace", day_index=0, pace="relaxed")],
+            affected_day_indexes=[0],
+            explanation="放慢节奏",
+        )
+
+    def test_version_mismatch_rejected(self):
+        from app.services.patch_service import apply_plan_patch
+        new_plan, issues = apply_plan_patch(self._plan(), self._patch(1), current_version=3)
+        self.assertTrue(any(i.code == "BASE_VERSION_CONFLICT" for i in issues))
+
+    def test_version_match_applies(self):
+        from app.services.patch_service import apply_plan_patch
+        new_plan, issues = apply_plan_patch(self._plan(), self._patch(3), current_version=3)
+        self.assertEqual(issues, [])
+        self.assertEqual(new_plan.days[0].pace, "relaxed")
+
+    def test_no_version_skips_check(self):
+        # 未保存的会话快照场景：不传 current_version 不校验
+        from app.services.patch_service import apply_plan_patch
+        new_plan, issues = apply_plan_patch(self._plan(), self._patch(7), current_version=None)
+        self.assertEqual(issues, [])
+
+
+class CandidateChoiceSyncTestCase(TestCase):
+    """融合后半：候选选择云端回写 + 跨篇时长冲突标记。"""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        from app.services.guide_store_service import GuideStoreService
+        self.store = GuideStoreService(database_path=Path(self._tmp.name) / "t.db")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _candidate(self, name, poi_id, duration):
+        from app.models.candidate import CandidatePlace
+        from app.models.schemas import Location as Loc
+        return CandidatePlace(
+            candidate_id=f"cand-{poi_id}", canonical_name=name, city="北京",
+            poi_id=poi_id, location=Loc(longitude=116.4, latitude=39.9),
+            fact_status="verified", suggested_duration_minutes=duration,
+        )
+
+    def test_choices_roundtrip(self):
+        from app.models.guide import GuideInput, GuideParseResult
+
+        record = self.store.create_record(GuideInput(input_type="text", content="x", city="北京"))
+        result = GuideParseResult(
+            source_id=record.id, parse_status="parsed", city="北京",
+            candidates=[self._candidate("故宫", "B1", 90), self._candidate("天坛", "B2", 60)],
+        )
+        self.store.save_result(record.id, result)
+        updated = self.store.update_candidate_choices(
+            record.id, {"cand-B1": "required", "cand-B2": "excluded"}
+        )
+        self.assertIsNotNone(updated)
+        choices = {c.canonical_name: c.user_choice for c in updated.result.candidates}
+        self.assertEqual(choices, {"故宫": "required", "天坛": "excluded"})
+        # 聚合口径读到同样状态
+        again = self.store.get_record(record.id)
+        self.assertEqual(again.result.candidates[0].user_choice, "required")
+
+    def test_unknown_choice_id_ignored(self):
+        from app.models.guide import GuideInput, GuideParseResult
+
+        record = self.store.create_record(GuideInput(input_type="text", content="x"))
+        self.store.save_result(record.id, GuideParseResult(
+            source_id=record.id, parse_status="parsed",
+            candidates=[self._candidate("故宫", "B1", 90)],
+        ))
+        updated = self.store.update_candidate_choices(record.id, {"cand-不存在": "required"})
+        self.assertEqual(updated.result.candidates[0].user_choice, "preferred")  # 不变
+
+    def test_conflicting_duration_marked(self):
+        from app.services.candidate_pool_service import CandidatePool
+
+        pool = CandidatePool()
+        pool.add_or_merge(self._candidate("故宫", "B1", 90))
+        cid, merged = pool.add_or_merge(self._candidate("故宫", "B1", 180))  # 同 poi 不同建议时长
+        self.assertTrue(merged)
+        place = pool.get(cid)
+        self.assertTrue(any("时长不一致" in w for w in place.warnings), place.warnings)
+        self.assertEqual(place.suggested_duration_minutes, 90)  # 先入池值保留，不猜答案

@@ -277,11 +277,21 @@ class TripStoreService:
     @staticmethod
     def _summary(row: sqlite3.Row) -> SavedTripSummary:
         plan = TripPlan.model_validate_json(row["plan_json"])
+        # 封面：按天序取第一个有图片的景点，让列表卡片直接展示真实目的地照片
+        cover = None
+        for day in plan.days:
+            for attraction in day.attractions:
+                if attraction.image_url or attraction.photos:
+                    cover = attraction.image_url or attraction.photos[0]
+                    break
+            if cover:
+                break
         return SavedTripSummary(
             id=row["id"], title=row["title"], city=plan.city,
             start_date=plan.start_date, end_date=plan.end_date, days=len(plan.days),
             estimated_budget=plan.budget.total if plan.budget else None,
             data_quality=plan.data_quality, current_version=row["current_version"],
+            cover_image_url=cover,
             created_at=row["created_at"], updated_at=row["updated_at"],
         )
 

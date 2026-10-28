@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from ...config import get_settings
 from ...graphs.guide_fusion_graph import run_guide_fusion
@@ -107,6 +108,27 @@ def get_guide_source(source_id: str):
     if record is None:
         raise HTTPException(status_code=404, detail="攻略来源不存在")
     return record
+
+
+@router.patch("/{source_id}/candidates/choices")
+def update_candidate_choices(source_id: str, payload: CandidateChoicesPayload):
+    """用户确认板的四档选择回写（融合后半的 user_select 语义）。
+
+    选择存进该篇候选，聚合候选池与后续规划即刻反映；跨设备一致。
+    """
+    record = guide_store_service.get_record(source_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="攻略来源不存在")
+    updated = guide_store_service.update_candidate_choices(source_id, payload.choices)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="攻略来源不存在")
+    return {"updated": sum(1 for c in payload.choices.values())}
+
+
+class CandidateChoicesPayload(BaseModel):
+    """候选选择回写载荷：candidate_id -> user_choice。"""
+
+    choices: dict[str, str] = Field(..., max_length=100, description="candidate_id -> required/preferred/optional/excluded")
 
 
 @router.delete("/{source_id}", status_code=204)

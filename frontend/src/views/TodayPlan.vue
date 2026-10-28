@@ -39,9 +39,26 @@
           <h2>第 {{ selectedDay + 1 }} 天</h2>
           <p>{{ currentDay.description }}</p>
 
+          <div v-if="isTodaySelected && currentStepIndex >= 0" class="now-block">
+            <span class="now-kicker">▶ 现在</span>
+            <b>{{ currentSteps[currentStepIndex].title }}</b>
+            <small>{{ currentStepTiming }}</small>
+          </div>
+          <div v-else-if="isTodaySelected" class="now-block done">
+            <span class="now-kicker">▶ 现在</span>
+            <b>今天的安排都完成了</b>
+            <small>好好休息，或看看明天的计划</small>
+          </div>
+
           <div v-if="todayWeather" class="weather-chip">
             <span>{{ weatherIcon(todayWeather.day_weather) }}</span>
-            <div><b>{{ todayWeather.day_temp }}°</b><small>{{ todayWeather.day_weather }} · {{ todayWeather.wind_direction }}</small></div>
+            <div>
+              <b>{{ todayWeather.day_temp }}°</b>
+              <small>{{ todayWeather.day_weather }} · {{ todayWeather.wind_direction }} {{ todayWeather.wind_power }}</small>
+              <div v-if="weatherTips.length" class="weather-tips">
+                <span v-for="tip in weatherTips" :key="tip">{{ tip }}</span>
+              </div>
+            </div>
           </div>
 
           <div class="day-progress-ring" :style="{ '--progress': `${dayProgress(selectedDay) * 3.6}deg` }">
@@ -62,14 +79,18 @@
               v-for="(step, index) in currentSteps"
               :key="step.key"
               class="plan-step"
-              :class="{ completed: isCompleted(step.key), saving: savingKey === step.key }"
+              :class="{ completed: isCompleted(step.key), saving: savingKey === step.key, now: index === currentStepIndex }"
             >
               <button class="check-button" :aria-label="isCompleted(step.key) ? '标记为未完成' : '标记为完成'" @click="toggleStep(step)">
                 {{ isCompleted(step.key) ? '✓' : index + 1 }}
               </button>
               <div class="step-icon">{{ step.icon }}</div>
               <div class="step-content">
-                <div class="step-meta"><span>{{ step.category }}</span><small>{{ step.hint }}</small></div>
+                <div class="step-meta">
+                  <span>{{ step.category }}</span>
+                  <small>{{ step.hint }}</small>
+                  <em v-if="index === currentStepIndex" class="now-chip">▶ 现在 · {{ currentStepTiming }}</em>
+                </div>
                 <h3>{{ step.title }}</h3>
                 <p v-if="step.description">{{ step.description }}</p>
                 <span v-if="step.address" class="address">⌖ {{ step.address }}</span>
@@ -91,7 +112,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Spin as ASpin, message } from 'ant-design-vue'
 import { getSavedTrip, getTripProgress, updateTripProgress } from '@/services/api'
@@ -105,6 +126,9 @@ interface ExecutionStep {
   address?: string
   hint: string
   icon: string
+  location?: { longitude: number; latitude: number }
+  startMinutes?: number   // 当日开始分钟数（"现在"定位用）
+  endMinutes?: number
 }
 
 const route = useRoute()
@@ -141,15 +165,50 @@ const buildSteps = (day: DayPlan): ExecutionStep[] => {
   if (day.schedule?.length) {
     const labels = { meal: '餐饮', transport: '交通', attraction: '景点', hotel: '住宿', break: '机动时间' }
     const icons = { meal: '🍜', transport: '↝', attraction: '⌖', hotel: '▣', break: '☕' }
-    return day.schedule.map((slot, index) => ({
-      key: slot.stable_id || `${dayKey}-s-${index}`,
-      category: labels[slot.item_type],
-      title: slot.title,
-      description: slot.description,
-      address: slot.address,
-      hint: `${slot.start_day_offset ? '次日 ' : ''}${slot.start_time}—${slot.end_day_offset ? '次日 ' : ''}${slot.end_time}`,
-      icon: icons[slot.item_type]
-    }))
+    const toMinutes = (value: string) => {
+      const [h, m] = value.split(':').map(Number)
+      return (h || 0) * 60 + (m || 0)
+    }
+    const scheduled: ExecutionStep[] = day.schedule
+      .filter(slot => !(slot.item_type === 'transport' && slot.title.startsWith('前往 ')))
+      .map((slot, index) => {
+      // 景点类步骤回查景点坐标，导航可以直接"到点"而不是按名字搜
+      const attraction = slot.item_type === 'attraction' && slot.related_index !== undefined
+        ? day.attractions[slot.related_index]
+        : undefined
+      const isAttraction = slot.item_type === 'attraction'
+      return {
+        key: slot.stable_id || `${dayKey}-s-${index}`,
+        category: labels[slot.item_type],
+        title: slot.title,
+        description: slot.description,
+        address: slot.address,
+        hint: isAttraction && attraction
+          ? `建议游玩 ${Math.round(attraction.visit_duration / 60 * 10) / 10} 小时`
+          : `${slot.start_day_offset ? '次日 ' : ''}${slot.start_time}—${slot.end_day_offset ? '次日 ' : ''}${slot.end_time}`,
+        icon: icons[slot.item_type],
+        location: attraction?.location,
+        startMinutes: isAttraction || slot.start_day_offset ? undefined : toMinutes(slot.start_time),
+        endMinutes: isAttraction || slot.end_day_offset ? undefined : toMinutes(slot.end_time),
+      }
+    })
+    const scheduledAttractions = new Set(
+      scheduled.filter(step => step.category === '景点').map(step => step.title)
+    )
+    for (const attraction of day.attractions) {
+      if (scheduledAttractions.has(attraction.name)) continue
+      scheduled.push({
+        key: `${day.date}-attraction-${attraction.poi_id || attraction.name}`,
+        category: '景点',
+        title: attraction.name,
+        description: attraction.description,
+        address: attraction.address,
+        hint: `建议游玩 ${Math.round(attraction.visit_duration / 60 * 10) / 10} 小时`,
+        icon: '⌖',
+        location: attraction.location,
+      })
+    }
+    return scheduled
   }
   const meals = Object.fromEntries(day.meals.map(meal => [meal.type, meal]))
   const steps: ExecutionStep[] = []
@@ -168,6 +227,44 @@ const buildSteps = (day: DayPlan): ExecutionStep[] => {
   return steps
 }
 
+// 当前时刻（每分钟刷新）：用于"现在该在哪"的高亮与剩余时间
+const nowMinutes = ref(-1)
+let clockTimer: number | undefined
+const refreshNow = () => {
+  const now = new Date()
+  nowMinutes.value = now.getHours() * 60 + now.getMinutes()
+}
+refreshNow()
+clockTimer = window.setInterval(refreshNow, 60_000)
+
+// 当前步骤：选中日=今天时，找时间上"正在进行或即将开始"的第一个未完成步骤
+const isTodaySelected = computed(() => currentDay.value?.date === localDate())
+const currentStepIndex = computed(() => {
+  if (!isTodaySelected.value || nowMinutes.value < 0) return -1
+  const steps = currentSteps.value
+  // 未完成里第一个"未结束"的（进行中或还没到）
+  for (let i = 0; i < steps.length; i++) {
+    if (isCompleted(steps[i].key)) continue
+    if (steps[i].startMinutes === undefined && steps[i].endMinutes === undefined) continue
+    const end = steps[i].endMinutes ?? steps[i].startMinutes!
+    if (end >= nowMinutes.value) return i
+  }
+  return -1
+})
+// 当前步骤的"还剩 N 分钟 / N 分钟后开始"
+const currentStepTiming = computed(() => {
+  const index = currentStepIndex.value
+  if (index < 0) return ''
+  const step = currentSteps.value[index]
+  if (step.startMinutes !== undefined && step.startMinutes > nowMinutes.value) {
+    return `${step.startMinutes - nowMinutes.value} 分钟后开始`
+  }
+  if (step.endMinutes !== undefined) {
+    return `还剩约 ${Math.max(1, step.endMinutes - nowMinutes.value)} 分钟`
+  }
+  return '进行中'
+})
+
 const allSteps = computed(() => trip.value?.plan.days.map(buildSteps) || [])
 const currentDay = computed(() => trip.value!.plan.days[selectedDay.value])
 const currentSteps = computed(() => allSteps.value[selectedDay.value] || [])
@@ -181,6 +278,10 @@ const dayProgress = (index: number) => {
 const overallPercent = computed(() => {
   const steps = allSteps.value.flat()
   return steps.length ? Math.round(steps.filter(step => isCompleted(step.key)).length / steps.length * 100) : 0
+})
+
+onUnmounted(() => {
+  if (clockTimer) window.clearInterval(clockTimer)
 })
 
 const toggleStep = async (step: ExecutionStep) => {
@@ -201,8 +302,29 @@ const toggleStep = async (step: ExecutionStep) => {
 
 const shortDate = (value: string) => new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', weekday: 'short' }).format(new Date(`${value}T00:00:00`))
 const dayRelation = (value: string) => value === localDate() ? 'TODAY · 今天' : value > localDate() ? 'UPCOMING · 即将到来' : 'PAST · 已经过往'
+// 今天出门前的贴身提醒：雨具/防晒/保暖/防风
+const weatherTips = computed(() => {
+  const weather = todayWeather.value
+  if (!weather) return []
+  const tips: string[] = []
+  const all = `${weather.day_weather}${weather.night_weather}`
+  if (all.includes('雨')) tips.push('☂ 带伞')
+  if (all.includes('雪')) tips.push('❄ 防滑')
+  if ((weather.day_temp || 0) >= 35) tips.push('🥵 高温防晒')
+  if ((weather.day_temp || 0) <= 5) tips.push('🧣 保暖')
+  const gust = Math.max(0, ...(weather.wind_power || '').match(/\d+/g)?.map(Number) || [0])
+  if (gust >= 5) tips.push('💨 大风')
+  return tips
+})
+
 const weatherIcon = (weather: string) => weather.includes('雨') ? '🌧️' : weather.includes('云') ? '⛅' : weather.includes('雪') ? '❄️' : '☀️'
-const navigationUrl = (step: ExecutionStep) => `https://uri.amap.com/search?keyword=${encodeURIComponent(step.title)}&city=${encodeURIComponent(trip.value?.city || '')}`
+const navigationUrl = (step: ExecutionStep) => {
+  // 有坐标：直接发起"到这个地方"的导航；没有坐标：按名称在城市内搜索
+  if (step.location) {
+    return `https://uri.amap.com/navigation?to=${step.location.longitude},${step.location.latitude},${encodeURIComponent(step.title)}&mode=car&coordinate=gaode`
+  }
+  return `https://uri.amap.com/search?keyword=${encodeURIComponent(step.title)}&city=${encodeURIComponent(trip.value?.city || '')}`
+}
 </script>
 
 <style scoped>
@@ -271,4 +393,16 @@ const navigationUrl = (step: ExecutionStep) => `https://uri.amap.com/search?keyw
 .loading-state { min-height: 60vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 15px; color: #8490a1; }
 @media (max-width: 820px) { .day-layout { grid-template-columns: 1fr; } .day-summary { position: static; } .day-progress-ring { margin-block: 16px; } }
 @media (max-width: 600px) { .today-header { padding-inline: 18px; } .hero-content { align-items: flex-start; flex-direction: column; } .overall-progress { width: 100%; } .today-main { padding-inline: 14px; } .day-tabs { display: flex; overflow-x: auto; } .day-tabs button { min-width: 128px; } .plan-board { padding: 15px; } .plan-step { grid-template-columns: 34px 36px 1fr; } .nav-button { grid-column: 3; justify-self: start; } }
+
+/* "现在"高亮与侧栏块 */
+.plan-step.now { border-color: #ff6b4a; box-shadow: 0 10px 26px rgba(255, 107, 74, .18); background: #fffaf8; }
+.now-chip { margin-left: auto; padding: 3px 10px; border-radius: 999px; color: #fff; background: #ff6b4a; font-size: 10px; font-weight: 800; font-style: normal; letter-spacing: .5px; animation: nowPulse 2s ease infinite; }
+@keyframes nowPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,107,74,.45); } 50% { box-shadow: 0 0 0 5px rgba(255,107,74,.18); } }
+.now-block { margin: 18px 0 0; padding: 14px; border-radius: 12px; color: #fff; background: linear-gradient(135deg, #ff6b4a, #ff8b73); display: flex; flex-direction: column; gap: 3px; }
+.now-block.done { background: linear-gradient(135deg, #21a179, #43c79b); }
+.now-block b { font-size: 15px; }
+.now-block small { opacity: .85; font-size: 11px; }
+.now-kicker { font-size: 9px; font-weight: 900; letter-spacing: 1.2px; opacity: .9; }
+.weather-tips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.weather-tips span { padding: 2px 8px; border-radius: 999px; background: #ffedd9; color: #b25f0a; font-size: 10px; font-weight: 700; }
 </style>

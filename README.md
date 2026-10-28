@@ -11,7 +11,7 @@
 - **粘贴正文 / 公开链接 / 截图**三种导入方式（截图走视觉模型 `qwen3.8-omni-flash`，一次调用完成文字转写与地点提取）
 - LLM 只负责提取地点与推荐理由，**坐标/名称一律回流高德 POI 校准**——查不到的地点明确标记"未确认位置"，绝不伪造坐标参与路线计算
 - 跨攻略合并去重（poi_id 优先 + 名称包含归并，"鸡鸣寺/古鸡鸣寺"、"玄武湖/玄武湖景区"自动归并），来源可追溯
-- 候选确认板：必去 / 想去 / 可选 / 不去四档选择，云端聚合 + 本机覆盖，可删除攻略
+- 候选确认板：勾选框一键取舍（批量全选/按类筛选），进阶可调必去/想去/可选/不去四档优先级；云端聚合 + 本机覆盖，可删除攻略
 
 ### LangGraph 多 Agent 规划
 - **四节点并行研究**（景点/天气/酒店/跨城交通 fan-out → reducer 合并 fan-in），单分支失败只降级对应数据
@@ -27,6 +27,11 @@
 - 确定性预算引擎（按人数/房间/晚数计算，不采用 LLM 汇总金额）、数据来源标记（实时/估算/缓存/生成）、降级明确提示
 - SSE 实时进度推送（Agent 级状态与耗时、断线重连与事件续传）、任务队列配额限流
 - 行程版本链（AI 修改/手动编辑/恢复历史均生成新版本）与执行模式（每日可勾选计划表）
+
+### 沉浸式行程展示
+- 行程页深色沉浸式设计：概览 Tab 以 Coverflow 封面轮播呈现全部景点（点击卡片直达对应行程日），配橙色高亮的日期区间与"出发前须知"贴士（规划收尾时基于完整行程生成，模型不可用时规则兜底）
+- 锚点式分区导航（概览/预算/地图/每日行程/天气）随滚动自动高亮；地图路线按日着色 + 编号标记与行程卡片双向联动
+- 支持导出图片 / PDF 与复制分享链接，历史版本随时可回滚
 
 ## 🧭 系统架构
 
@@ -68,7 +73,7 @@ flowchart TB
 | 持久化 | SQLite（行程库 + 版本链 + 执行进度 + 攻略来源/事实），pydantic v2 全链路数据契约 |
 | 后端 | Python 3.12 · FastAPI（SSE 流式进度） |
 | 前端 | Vue 3 · TypeScript · Vite · Ant Design Vue · 高德 JS API · SSE（EventSource） |
-| 测试 | unittest + mock + fakeredis + InMemorySaver，**147 个用例** |
+| 测试 | unittest + mock + fakeredis + InMemorySaver，**168 个用例** |
 
 ## 📁 项目结构
 
@@ -82,7 +87,7 @@ helloagents-trip-planner/
 │   │   ├── infrastructure/     # LLM 客户端(代理回退/分模型) / MCP 会话池 / redis_client
 │   │   ├── models/             # schemas / candidate(候选契约) / patch / guide / geo
 │   │   └── services/           # 候选池/攻略提取/Provider/存储/质量/时间轴/路线优化...
-│   ├── tests/                  # 147 个测试（fakeredis/桩 Agent，显式内存模式）
+│   ├── tests/                  # 168 个测试（fakeredis/桩 Agent，显式内存模式）
 │   └── evaluation/             # 离线评测器（JSONL 样本）
 ├── frontend/src/
 │   ├── views/                  # Home / GuideImport / Result / MyTrips / TodayPlan
@@ -133,7 +138,7 @@ npm run dev                      # PowerShell 若禁用 npm.ps1 用 npm.cmd run 
 # 后端（Windows PowerShell，显式内存模式）
 cd backend
 $env:REDIS_ENABLED = "false"; $env:PYTHONUTF8 = "1"; $env:PYTHONIOENCODING = "utf-8"
-.\venv\Scripts\python.exe -m unittest discover tests   # 147 个用例
+.\venv\Scripts\python.exe -m unittest discover tests   # 168 个用例
 
 # 前端
 cd frontend; npm.cmd run build                        # 含 vue-tsc 类型检查

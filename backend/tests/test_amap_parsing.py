@@ -1,7 +1,11 @@
 import json
+from types import SimpleNamespace
 from unittest import TestCase
+from unittest.mock import Mock, patch
 
+from app.services import amap_service as amap_module
 from app.services.amap_service import AmapService, _decode_mcp_payload
+from app.models.schemas import Location
 
 
 class FakeTool:
@@ -19,6 +23,11 @@ def make_service(payload) -> AmapService:
 
 
 class AmapPayloadTests(TestCase):
+    def setUp(self):
+        with amap_module._POI_CACHE_LOCK:
+            amap_module._POI_MEMORY_CACHE.clear()
+            amap_module._POI_INFLIGHT.clear()
+
     def test_decodes_content_text_wrapper(self):
         raw = json.dumps({
             "content": [{"type": "text", "text": json.dumps({"pois": [{"name": "故宫"}]})}]
@@ -74,6 +83,94 @@ class AmapPayloadTests(TestCase):
         }))
         with self.assertRaises(RuntimeError):
             service.search_poi("不存在的店", "南京")
+
+    def test_direct_search_keeps_location_and_uses_memory_cache(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "status": "1",
+            "pois": [{
+                "id": "B000A8UIN8",
+                "name": "故宫博物院",
+                "address": "景山前街4号",
+                "type": "风景名胜",
+                "location": "116.397029,39.917839",
+            }],
+        }
+        service = object.__new__(AmapService)
+        service._prefer_direct_poi_search = True
+
+        settings = SimpleNamespace(redis_enabled=False, amap_api_key="test-key")
+        with patch.object(amap_module, "get_settings", return_value=settings), patch.object(
+            amap_module, "_wait_for_amap_poi_slot"
+        ), patch.object(
+            amap_module.requests, "get", return_value=response
+        ) as request:
+            first = service.search_poi("故宫", "北京")
+            second = service.search_poi("故宫", "北京")
+
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(first[0].id, "B000A8UIN8")
+        self.assertAlmostEqual(first[0].location.longitude, 116.397029)
+        self.assertEqual(second[0].location, first[0].location)
+
+    def test_direct_search_retries_qps_error_only_for_failed_request(self):
+        limited = Mock()
+        limited.raise_for_status.return_value = None
+        limited.json.return_value = {
+            "status": "0", "info": "CUQPS_HAS_EXCEEDED_THE_LIMIT"
+        }
+        success = Mock()
+        success.raise_for_status.return_value = None
+        success.json.return_value = {
+            "status": "1",
+            "pois": [{
+                "id": "B000A7O1CU", "name": "颐和园",
+                "address": "新建宫门路19号", "type": "风景名胜",
+                "location": "116.275179,39.999617",
+            }],
+        }
+        service = object.__new__(AmapService)
+        service._prefer_direct_poi_search = True
+
+        settings = SimpleNamespace(redis_enabled=False, amap_api_key="test-key")
+        with patch.object(amap_module, "get_settings", return_value=settings), patch.object(
+            amap_module, "_wait_for_amap_poi_slot"
+        ), patch.object(
+            amap_module.time, "sleep"
+        ), patch.object(
+            amap_module.requests, "get", side_effect=[limited, success]
+        ) as request:
+            result = service.search_poi("颐和园", "北京")
+
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(result[0].name, "颐和园")
+
+    def test_nearby_restaurant_search_uses_one_direct_around_request(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "status": "1",
+            "pois": [{
+                "id": "B0FOOD", "name": "附近餐厅", "address": "测试路1号",
+                "type": "餐饮服务", "location": "116.401,39.901",
+            }],
+        }
+        service = object.__new__(AmapService)
+        service._prefer_direct_poi_search = True
+        settings = SimpleNamespace(redis_enabled=False, amap_api_key="test-key")
+
+        with patch.object(amap_module, "get_settings", return_value=settings), patch.object(
+            amap_module, "_wait_for_amap_poi_slot"
+        ), patch.object(amap_module.requests, "get", return_value=response) as request:
+            result = service.search_restaurants(
+                "午餐", "北京", Location(longitude=116.4, latitude=39.9), 1500
+            )
+
+        self.assertEqual(request.call_count, 1)
+        self.assertIn("/place/around", request.call_args.args[0])
+        self.assertEqual(request.call_args.kwargs["params"]["radius"], "1500")
+        self.assertEqual(result[0].name, "附近餐厅")
 
     def test_parses_weather_forecasts(self):
         service = make_service(json.dumps({

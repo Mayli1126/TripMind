@@ -38,6 +38,7 @@ class PlanningState(TypedDict, total=False):
 
     # RevisionGraph（自然语言增量修改）
     revision_instruction: str
+    base_version: Optional[int]               # 行程库当前版本号（乐观锁，None 不校验）
     plan_patch: Optional[Any]                 # PlanPatch（避免循环导入用 Any）
     patch_error: Optional[str]
     patched_plan: Optional[TripPlan]

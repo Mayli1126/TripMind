@@ -115,6 +115,11 @@ class ResearchFanoutTestCase(unittest.TestCase):
                 "finalize",
                 side_effect=lambda plan, request, **kwargs: plan,
             ),
+            mock.patch.object(
+                trip_quality_service,
+                "refine_overall_suggestions",
+                side_effect=lambda plan, request, **kwargs: plan.overall_suggestions,
+            ),
         ]
         for patch in self.patches:
             patch.start()

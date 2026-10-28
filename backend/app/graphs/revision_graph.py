@@ -244,7 +244,9 @@ def apply_patch_node(state: PlanningState, config: RunnableConfig) -> dict:
     candidates = getattr(state.get("request"), "candidate_places", None)
 
     planner._report_progress(callback, 65, "patching", "正在应用修改")
-    new_plan, issues = apply_plan_patch(plan, patch, candidates)
+    new_plan, issues = apply_plan_patch(
+        plan, patch, candidates, current_version=state.get("base_version")
+    )
     errors = [i for i in issues if i.severity == "error"]
     if errors:
         preserved = plan.model_copy(deep=True)
@@ -325,14 +327,19 @@ def run_revision_graph(
     current_plan: TripPlan,
     instruction: str,
     progress_callback: ProgressCallback = None,
+    base_version: Optional[int] = None,
 ) -> TripPlan:
-    """同步执行修订图；解析失败或异常时回退 legacy revise_trip。"""
+    """同步执行修订图；解析失败或异常时回退 legacy revise_trip。
+
+    base_version：行程库当前版本号（乐观锁），None 表示不校验版本。
+    """
     planner = _get_planner()
     try:
         state = PlanningState(
             mode="revision",
             request=request,
             plan=current_plan,
+            base_version=base_version,
             revision_instruction=instruction,
             warnings=[],
         )

@@ -223,7 +223,7 @@ class ItineraryScheduleService:
         departure = self._minutes(return_journey.departure_time) if returning else 0
         station_leave = (
             departure - return_journey.station_transfer_minutes - return_journey.check_in_buffer_minutes
-            if returning else 24 * 60
+            if returning else 21 * 60 + 30
         )
 
         lunch_added = bool(arrival_day and current >= 14 * 60)
@@ -282,6 +282,11 @@ class ItineraryScheduleService:
                 current = max(current, 17 * 60 + 45)
                 current = self._append_meal(items, day, current, meals.get("dinner"), "晚餐", 75)
                 dinner_added = True
+
+            # 插入午/晚餐后需重新检查当日截止时间，避免先判断可放入、
+            # 再因用餐顺延成深夜游览。
+            if current + travel_minutes + duration > station_leave:
+                continue
 
             current = self._append(
                 items, day, current, travel_minutes, "transport", f"前往 {attraction.name}",

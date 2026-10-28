@@ -70,7 +70,8 @@ def _execute(message_id: str, fields: dict[str, Any]) -> None:
             from ..graphs.revision_graph import run_revision_graph
 
             result = run_revision_graph(
-                request, plan, payload["instruction"], recorder.callback()
+                request, plan, payload["instruction"], recorder.callback(),
+                base_version=payload.get("base_version"),
             )
         else:
             raise ValueError(f"未知任务类型: {job_type}")

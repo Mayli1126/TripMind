@@ -35,19 +35,35 @@
           </a-form-item>
         </template>
         <template v-else>
-          <a-form-item label="攻略截图" required>
-            <div class="image-upload-area">
+          <a-form-item label="攻略文件（可多选）" required>
+            <div
+              class="image-upload-area"
+              :class="{ 'is-dragover': dragover }"
+              @dragover.prevent="dragover = true"
+              @dragleave.prevent="dragover = false"
+              @drop.prevent="handleDrop"
+            >
               <img v-if="imagePreview" :src="imagePreview" class="image-preview" alt="攻略截图预览" />
               <a-upload
-                :before-upload="handleImageSelected"
+                :before-upload="handleFileSelected"
                 :show-upload-list="false"
-                accept="image/png,image/jpeg,image/jpg,image/webp"
+                multiple
+                accept="image/png,image/jpeg,image/jpg,image/webp,.txt,.md"
               >
-                <a-button>{{ imagePreview ? '重新选择' : '选择截图（PNG/JPG/WebP，≤6MB）' }}</a-button>
+                <a-button>{{ pendingFiles.length ? `已选 ${pendingFiles.length} 个文件，可继续添加` : '选择截图或 txt/md 文件（可多选，≤6MB/个）' }}</a-button>
               </a-upload>
-              <a-button v-if="imagePreview" size="small" @click="clearImage">清除</a-button>
+              <a-button v-if="pendingFiles.length" size="small" @click="clearPending">清空</a-button>
             </div>
-            <p class="parse-tip">支持小红书/公众号等长图截图；AI 会识别图中的行程文字并到高德核对地点。</p>
+            <p class="parse-tip">
+              支持小红书/公众号长图截图（可一次选多张拼成一篇完整攻略）与 txt/md 攻略文件，也可以直接拖拽到这里。
+              AI 会逐篇识别内容并到高德核对地点，失败的单篇可单独重试。
+            </p>
+            <ul v-if="pendingFiles.length" class="pending-list">
+              <li v-for="(item, index) in pendingFiles" :key="index">
+                {{ item.name }}（{{ item.inputType === 'image' ? '截图' : '文本' }}）
+                <a @click.prevent="removePending(index)">移除</a>
+              </li>
+            </ul>
           </a-form-item>
         </template>
 
@@ -56,9 +72,9 @@
         </a-form-item>
 
         <a-button type="primary" size="large" :loading="parsing" :disabled="!canSubmit" @click="handleParse">
-          {{ parsing ? '正在解析攻略…' : '解析攻略' }}
+          {{ parseButtonText }}
         </a-button>
-        <p v-if="parsing" class="parse-tip">正在提取地点并到高德地图核对位置，一般需要 30 秒到 1 分钟。</p>
+        <p v-if="parsing" class="parse-tip">{{ parseProgressText }}</p>
       </a-form>
     </a-card>
 
@@ -112,16 +128,29 @@
       <a-card class="board-card" :bordered="false">
         <template #title>
           <span>候选地点确认</span>
-          <span class="board-subtitle">选择哪些"必去"、哪些"不去"，后续规划会尊重你的选择</span>
+          <span class="board-subtitle">先勾选要去的地点（右侧可再调优先级），确认后才用于规划</span>
         </template>
-        <CandidatePlaceBoard :candidates="candidates" @change="() => persistCandidates(true)" />
+        <template #extra>
+          <a-button v-if="mappableCandidates.length >= 2" size="small" @click="toggleCandidateMap">
+            {{ candidateMapOpen ? '收起分布图' : '看地图分布 📍' }}
+          </a-button>
+        </template>
+        <div v-show="candidateMapOpen && mappableCandidates.length >= 2" class="candidate-map">
+          <div id="candidate-map-container"></div>
+          <p class="candidate-map-tip">每个点是一个候选地点，颜色代表你的选择（橙=必去、蓝=想去、灰=不去）</p>
+        </div>
+        <CandidatePlaceBoard
+          :candidates="candidates"
+          @change="() => persistCandidates(true)"
+          @bulk-change="() => persistCandidates(true)"
+        />
         <div class="board-actions">
           <a-button
             type="primary"
             size="large"
-            :disabled="!candidates.length"
+            :disabled="!activeCount"
             @click="goPlanWithCandidates"
-          >用这 {{ activeCount }} 个候选去规划行程 →</a-button>
+          >用勾选的 {{ activeCount }} 个地点开始规划 →</a-button>
           <a-button @click="persistCandidates()">保存选择</a-button>
           <span v-if="savedTip" class="saved-tip">{{ savedTip }}</span>
         </div>
@@ -131,7 +160,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   Alert as AAlert,
@@ -149,7 +178,7 @@ import {
   message
 } from 'ant-design-vue'
 import CandidatePlaceBoard from '@/components/CandidatePlaceBoard.vue'
-import { deleteGuideSource, listGuideSources, parseGuideSource, retryGuideSource } from '@/services/api'
+import { deleteGuideSource, listGuideSources, parseGuideSource, retryGuideSource, updateCandidateChoices } from '@/services/api'
 import type { CandidatePlace, GuideInputType, GuideSourceRecord } from '@/types'
 
 // 已确认候选项在本机的暂存键；阶段 2 候选池接入主规划图后由此读取
@@ -160,33 +189,76 @@ const content = ref('')
 const sourceUrl = ref('')
 const title = ref('')
 const city = ref('')
-// 截图导入：base64（不含 data: 前缀）+ 预览地址
-const imageData = ref('')
-const imageMime = ref('image/jpeg')
+// 批量文件队列：截图与 txt/md 攻略文件混合，逐篇解析
+interface PendingFile {
+  name: string
+  inputType: GuideInputType
+  mimeType: string
+  base64?: string    // 截图：base64（不含 data: 前缀）
+  text?: string      // 文本文件内容
+  preview?: string   // 截图缩略
+}
+const pendingFiles = ref<PendingFile[]>([])
 const imagePreview = ref('')
+const dragover = ref(false)
+// 批量解析进度
+const batchTotal = ref(0)
+const batchDone = ref(0)
 
-// 截图选择：读取文件转 base64（≤6MB），返回 false 阻止 antd 自动上传
-const handleImageSelected = (file: File) => {
-  if (file.size > 6 * 1024 * 1024) {
-    message.error('截图不能超过 6MB，请压缩后重试')
+const MAX_FILE_BYTES = 6 * 1024 * 1024
+
+// antd Upload 的 before-upload：返回 false 阻止自动上传，转为加入本地队列
+const handleFileSelected = (file: File) => {
+  if (file.size > MAX_FILE_BYTES) {
+    message.error(`「${file.name}」超过 6MB，请压缩后重试`)
     return false
   }
-  const reader = new FileReader()
-  reader.onload = () => {
-    const result = String(reader.result || '')
-    const commaIndex = result.indexOf(',')
-    // data:image/png;base64,xxxx -> 拆出 mime 与纯 base64
-    const header = result.slice(0, commaIndex)
-    imageMime.value = header.match(/data:([^;]+)/)?.[1] || 'image/jpeg'
-    imageData.value = result.slice(commaIndex + 1)
-    imagePreview.value = result
+  if (file.type.startsWith('image/')) {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = String(reader.result || '')
+      const commaIndex = result.indexOf(',')
+      pendingFiles.value.push({
+        name: file.name,
+        inputType: 'image',
+        mimeType: result.slice(0, commaIndex).match(/data:([^;]+)/)?.[1] || 'image/jpeg',
+        base64: result.slice(commaIndex + 1),
+        preview: result,
+      })
+      // 预览区显示最后一张图
+      imagePreview.value = result
+    }
+    reader.readAsDataURL(file)
+  } else if (/\.(txt|md)$/i.test(file.name)) {
+    const reader = new FileReader()
+    reader.onload = () => {
+      pendingFiles.value.push({
+        name: file.name,
+        inputType: 'text',
+        mimeType: 'text/plain',
+        text: String(reader.result || ''),
+      })
+    }
+    reader.readAsText(file)
+  } else {
+    message.error(`「${file.name}」不是支持的类型（截图或 txt/md）`)
   }
-  reader.readAsDataURL(file)
   return false
 }
 
-const clearImage = () => {
-  imageData.value = ''
+const handleDrop = (event: DragEvent) => {
+  dragover.value = false
+  for (const file of event.dataTransfer?.files || []) {
+    handleFileSelected(file)
+  }
+}
+
+const removePending = (index: number) => {
+  pendingFiles.value.splice(index, 1)
+}
+
+const clearPending = () => {
+  pendingFiles.value = []
   imagePreview.value = ''
 }
 
@@ -201,6 +273,11 @@ const router = useRouter()
 const activeCount = computed(() => candidates.value.filter((item) => item.user_choice !== 'excluded').length)
 
 // 页面挂载时回显历史攻略：确认板聚合的候选跨会话/跨设备一致（服务端为准）
+onUnmounted(() => {
+  candidateMap?.destroy?.()
+  candidateMap = null
+})
+
 onMounted(async () => {
   try {
     records.value = await listGuideSources()
@@ -219,8 +296,23 @@ const candidates = computed<CandidatePlace[]>(() =>
 const canSubmit = computed(() => {
   if (inputType.value === 'text') return content.value.trim().length > 0
   if (inputType.value === 'url') return sourceUrl.value.trim().startsWith('http')
-  return imageData.value.length > 0
+  return pendingFiles.value.length > 0
 })
+
+const parseButtonText = computed(() => {
+  if (!parsing.value) {
+    return inputType.value === 'image' && pendingFiles.value.length > 1
+      ? `批量解析 ${pendingFiles.value.length} 个文件`
+      : '解析攻略'
+  }
+  return batchTotal.value > 1 ? `正在解析 ${batchDone.value}/${batchTotal.value} 篇…` : '正在解析攻略…'
+})
+
+const parseProgressText = computed(() =>
+  batchTotal.value > 1
+    ? `多篇攻略逐篇提取地点并到高德核对，已处理 ${batchDone.value}/${batchTotal.value} 篇。`
+    : '正在提取地点并到高德地图核对位置，一般需要 30 秒到 1 分钟。'
+)
 
 function retryHint(record: GuideSourceRecord): string {
   if (record.input_type === 'url') return record.result?.error_hint || '可点击"重试"再次尝试，或复制正文粘贴导入。'
@@ -232,12 +324,44 @@ async function handleParse() {
   parsing.value = true
   savedTip.value = ''
   try {
+    // 批量模式：截图/txt 文件队列逐篇解析（每篇独立，失败不影响其他篇）
+    if (inputType.value === 'image') {
+      batchTotal.value = pendingFiles.value.length
+      batchDone.value = 0
+      let failed = 0
+      for (const file of pendingFiles.value) {
+        try {
+          const record = await parseGuideSource({
+            input_type: file.inputType,
+            content: file.inputType === 'text' ? (file.text || '').trim() : undefined,
+            image_data: file.inputType === 'image' ? file.base64 : undefined,
+            image_mime: file.inputType === 'image' ? file.mimeType : undefined,
+            title: file.name,
+            city: city.value.trim() || undefined
+          })
+          records.value = [record, ...records.value.filter((item) => item.id !== record.id)]
+          if (record.parse_status === 'failed') failed += 1
+        } catch (error) {
+          failed += 1
+          message.warning(`${file.name}：${error instanceof Error ? error.message : '解析失败'}`)
+        }
+        batchDone.value += 1
+      }
+      const ok = batchTotal.value - failed
+      if (ok > 0) {
+        message.success(`批量解析完成：成功 ${ok} 篇${failed ? `，失败 ${failed} 篇（可单独重试或移除）` : ''}`)
+        clearPending()
+      } else {
+        message.error('全部解析失败，请检查文件内容或稍后重试')
+      }
+      return
+    }
+
+    // 单篇：正文粘贴 / 链接
     const record = await parseGuideSource({
       input_type: inputType.value,
       content: inputType.value === 'text' ? content.value.trim() : undefined,
       source_url: inputType.value === 'url' ? sourceUrl.value.trim() : undefined,
-      image_data: inputType.value === 'image' ? imageData.value : undefined,
-      image_mime: inputType.value === 'image' ? imageMime.value : undefined,
       title: title.value.trim() || undefined,
       city: city.value.trim() || undefined
     })
@@ -253,12 +377,13 @@ async function handleParse() {
       content.value = ''
       sourceUrl.value = ''
       title.value = ''
-      clearImage()
     }
   } catch (error) {
     message.error(error instanceof Error ? error.message : '攻略解析失败')
   } finally {
     parsing.value = false
+    batchTotal.value = 0
+    batchDone.value = 0
   }
 }
 
@@ -275,18 +400,76 @@ async function handleRetry(record: GuideSourceRecord) {
   }
 }
 
-// 候选选择持久化到本机：作为 user_choice 覆盖层，服务端聚合候选为主数据
-function persistCandidates(silent = false) {
+// ---- 候选地图分布：让用户看一眼这些地点在城市里的位置再决定 ----
+const candidateMapOpen = ref(false)
+const mappableCandidates = computed(() =>
+  candidates.value.filter(item => item.location?.longitude && item.location?.latitude)
+)
+let candidateMap: any = null
+
+const toggleCandidateMap = async () => {
+  candidateMapOpen.value = !candidateMapOpen.value
+  if (!candidateMapOpen.value) return
+  await nextTick()
+  try {
+    const AMapLoader = (await import('@amap/amap-jsapi-loader')).default
+    const AMap = await AMapLoader.load({
+      key: import.meta.env.VITE_AMAP_WEB_JS_KEY,
+      version: '2.0',
+      plugins: ['AMap.Marker']
+    })
+    candidateMap?.destroy?.()
+    candidateMap = new AMap.Map('candidate-map-container', { zoom: 11, viewMode: '2D' })
+    const choiceColor: Record<string, string> = { required: '#ff6b4a', preferred: '#4776e6', optional: '#9aa7bb', excluded: '#d3dae4' }
+    const markers = mappableCandidates.value.map(item =>
+      new AMap.Marker({
+        position: [item.location!.longitude, item.location!.latitude],
+        title: item.canonical_name,
+        anchor: 'center',
+        content: `<div title="${item.canonical_name}" style="width:12px;height:12px;border-radius:50%;background:${choiceColor[item.user_choice] || '#9aa7bb'};border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.3);cursor:pointer;"></div>`,
+      })
+    )
+    candidateMap.add(markers)
+    candidateMap.setFitView(markers, false, [40, 40, 40, 40])
+  } catch (error) {
+    console.error('候选地图加载失败:', error)
+    message.warning('地图暂时打不开，可稍后再试')
+    candidateMapOpen.value = false
+  }
+}
+
+// 候选选择持久化：本地快照（user_choice 覆盖层）+ 服务端回写（各攻略候选主数据）
+// 回写失败不阻塞——本地覆盖层仍能保证本机规划行为正确
+async function persistCandidates(silent = false) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(candidates.value))
-    if (silent) return
-    savedTip.value = `已保存 ${candidates.value.length} 个候选地点的选择`
-    message.success('候选地点选择已保存')
   } catch (error) {
     if (!silent) {
-      message.error('保存失败：浏览器本地存储不可用')
+      message.error('本地保存失败：浏览器存储不可用')
       console.error('候选地点保存失败:', error)
     }
+  }
+
+  // 按攻略分组回写服务端（PATCH /guide-sources/{id}/candidates/choices）
+  const bySource = new Map<string, Record<string, string>>()
+  for (const record of records.value) {
+    if (record.parse_status !== 'parsed' || !record.result) continue
+    for (const candidate of record.result.candidates) {
+      bySource.set(record.id, {
+        ...(bySource.get(record.id) || {}),
+        [candidate.candidate_id]: candidate.user_choice
+      })
+    }
+  }
+  const writes = [...bySource.entries()].map(([sourceId, choices]) =>
+    updateCandidateChoices(sourceId, choices).catch((error) => {
+      console.error('候选选择云端回写失败:', sourceId, error)
+    })
+  )
+  await Promise.allSettled(writes)
+  if (!silent) {
+    savedTip.value = `已保存 ${candidates.value.length} 个候选地点的选择`
+    message.success('候选地点选择已保存')
   }
 }
 
@@ -335,7 +518,16 @@ function goPlanWithCandidates() {
 .parse-tip { margin: 10px 0 0; font-size: 12px; color: #8a96a8; }
 
 /* 截图上传区 */
-.image-upload-area { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.image-upload-area {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px;
+  border: 1px dashed #d6dee9;
+  border-radius: 10px;
+}
+.image-upload-area.is-dragover { border-color: #ff6b4a; background: #fff8f5; }
 .image-preview {
   max-width: 320px;
   max-height: 220px;
@@ -343,6 +535,17 @@ function goPlanWithCandidates() {
   border: 1px solid #e6eaf1;
   object-fit: contain;
 }
+.pending-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  color: #4a5a72;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pending-list a { color: #ff6b4a; margin-left: 8px; }
 
 .result-section { display: flex; flex-direction: column; gap: 14px; }
 .section-title { margin: 8px 0 0; font-size: 18px; color: #14213d; }
@@ -356,4 +559,8 @@ function goPlanWithCandidates() {
 .board-subtitle { margin-left: 10px; font-size: 12px; font-weight: 400; color: #8a96a8; }
 .board-actions { margin-top: 16px; display: flex; align-items: center; gap: 12px; }
 .saved-tip { font-size: 12px; color: #21a179; }
+
+.candidate-map { margin-bottom: 14px; }
+#candidate-map-container { height: 300px; border-radius: 12px; border: 1px solid #e6eaf1; }
+.candidate-map-tip { margin: 8px 0 0; font-size: 11px; color: #97a2b4; }
 </style>

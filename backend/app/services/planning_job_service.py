@@ -259,6 +259,7 @@ class PlanningJobService:
         request: TripRequest,
         plan: TripPlan,
         instruction: str,
+        base_version: Optional[int] = None,
     ) -> PlanningJobResponse:
         # 阶段1批1：修订走 RevisionGraph（LLM 翻译 PlanPatch + 确定性应用），
         # 解析失败/超范围时图内部回退 legacy revise_trip，E2E 不回退。
@@ -271,10 +272,13 @@ class PlanningJobService:
                     "request": request.model_dump(mode="json"),
                     "plan": plan.model_dump_json(),
                     "instruction": instruction,
+                    "base_version": base_version,
                 },
             )
         return self._create_job(
-            lambda callback: run_revision_graph(request, plan, instruction, callback)
+            lambda callback: run_revision_graph(
+                request, plan, instruction, callback, base_version=base_version
+            )
         )
 
     def _create_redis_job(self, job_type: str, payload: dict[str, Any]) -> PlanningJobResponse:

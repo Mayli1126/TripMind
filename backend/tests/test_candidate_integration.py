@@ -218,6 +218,11 @@ class PlanningGraphCandidateTestCase(unittest.TestCase):
                 "finalize",
                 side_effect=lambda plan, request, **kwargs: plan,
             ),
+            mock.patch.object(
+                trip_quality_service,
+                "refine_overall_suggestions",
+                side_effect=lambda plan, request, **kwargs: plan.overall_suggestions,
+            ),
         ]
         for patch in self.patches:
             patch.start()
@@ -229,17 +234,21 @@ class PlanningGraphCandidateTestCase(unittest.TestCase):
         pg.reset_compiled_graph()
 
     def test_candidate_section_appended_to_planner_prompt(self):
+        """批2 管线：候选经骨架 digest 进入编排约束（必去标记 + 已核对坐标不外泄给 LLM）。"""
         request = _request(candidate_places=[_candidate("故宫博物院", choice="required")])
         run_planning_graph(request, None, job_id="cand-1")
-        self.assertEqual(len(self.planner.prompts), 1)
-        prompt = self.planner.prompts[0]
-        self.assertTrue(prompt.startswith("BASE_QUERY"))  # 原查询在前
-        self.assertIn("【必去】", prompt)
-        self.assertIn("116.39,39.91", prompt)
+        self.assertGreaterEqual(len(self.planner.prompts), 1)
+        skeleton_prompt = self.planner.prompts[0]  # 第一次调用是骨架 prompt
+        self.assertIn("【必去】", skeleton_prompt)          # 必去硬约束
+        self.assertIn("故宫博物院", skeleton_prompt)
+        self.assertNotIn("116.39,39.91", skeleton_prompt)  # 坐标不进 prompt，物化阶段回填
+        self.assertIn("容量", skeleton_prompt)              # 容量表在骨架输入里
 
     def test_no_candidates_prompt_unchanged(self):
+        """无候选时骨架 prompt 不含候选清单，回退路径保持旧行为。"""
         run_planning_graph(_request(), None, job_id="cand-2")
-        self.assertEqual(self.planner.prompts, ["BASE_QUERY"])
+        # 桩返回 'resp' 非骨架 JSON：管线回退，第二次调用是旧 BASE_QUERY
+        self.assertIn("BASE_QUERY", self.planner.prompts)
 
     def test_plan_receives_candidate_backfill_and_warnings(self):
         # 必去候选"颐和园"不在计划中 -> 回填生效 + 缺失告警写入 warnings
