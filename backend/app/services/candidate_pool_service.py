@@ -267,7 +267,7 @@ def apply_candidates_to_plan(plan, request) -> list[str]:
         for attraction in day.attractions:
             key = normalize_name(attraction.name)
             candidate = verified_by_name.get(key)
-            if candidate is not None:
+            if candidate is not None and (not attraction.poi_id or attraction.poi_id == candidate.poi_id):
                 # 坐标与 poi_id 以候选（地图核对）为准
                 attraction.poi_id = candidate.poi_id or attraction.poi_id
                 attraction.location = candidate.location

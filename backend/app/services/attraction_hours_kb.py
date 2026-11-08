@@ -30,7 +30,7 @@ class AttractionHours:
     # 建议游玩时长（分钟）
     recommended_duration: int = 120
     # 门票参考价（元）
-    reference_ticket_price: int = 0
+    reference_ticket_price: Optional[int] = None
     # 类别标签
     category: str = "景点"
 

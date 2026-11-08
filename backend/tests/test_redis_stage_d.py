@@ -12,6 +12,7 @@ from unittest import mock
 import fakeredis
 
 from app.infrastructure import redis_client
+from tests.queue_fixtures import publish_fixture
 from app.infrastructure.redis_client import (
     ack_job,
     append_job_event,
@@ -84,7 +85,7 @@ class RedisStageDTestCase(unittest.TestCase):
     # -- Stream 队列 ------------------------------------------------------
 
     def test_stream_enqueue_dequeue_ack_roundtrip(self):
-        enqueue_job("job-1", "plan", {"request": self._request()})
+        publish_fixture("job-1", "plan", {"request": self._request()})
         entries = dequeue_jobs(block_ms=50)
         self.assertEqual(len(entries), 1)
         message_id, fields = entries[0]
@@ -146,10 +147,10 @@ class RedisStageDTestCase(unittest.TestCase):
     # -- Worker -----------------------------------------------------------
 
     def test_worker_process_once_completes_job(self):
-        enqueue_job("job-4", "plan", {"request": self._request(), "attempt": 0})
+        publish_fixture("job-4", "plan", {"request": self._request(), "attempt": 0})
         plan = self._plan()
         with mock.patch(
-            "app.graphs.planning_graph.run_planning_graph", return_value=plan
+            "app.services.job_process.isolated_executor.run", return_value=plan.model_dump(mode='json')
         ) as run_mock:
             handled = planning_worker.process_once(block_ms=50)
 
@@ -164,9 +165,9 @@ class RedisStageDTestCase(unittest.TestCase):
         self.assertEqual(dequeue_jobs(block_ms=50), [])
 
     def test_worker_failure_schedules_retry(self):
-        enqueue_job("job-5", "plan", {"request": self._request(), "attempt": 0})
+        publish_fixture("job-5", "plan", {"request": self._request(), "attempt": 0})
         with mock.patch(
-            "app.graphs.planning_graph.run_planning_graph",
+            "app.services.job_process.isolated_executor.run",
             side_effect=RuntimeError("boom"),
         ):
             planning_worker.process_once(block_ms=50)
@@ -182,16 +183,16 @@ class RedisStageDTestCase(unittest.TestCase):
         self.assertEqual(redis_client._client.xlen("trip:jobs:dead"), 0)
 
     def test_worker_failure_exhausted_goes_dead_letter(self):
-        enqueue_job("job-6", "plan", {"request": self._request(), "attempt": 3})
+        publish_fixture("job-6", "plan", {"request": self._request(), "attempt": 3})
         with mock.patch(
-            "app.graphs.planning_graph.run_planning_graph",
+            "app.services.job_process.isolated_executor.run",
             side_effect=RuntimeError("boom"),
         ):
             planning_worker.process_once(block_ms=50)
 
         state = get_job_state("job-6")
         self.assertEqual(state["status"], "failed")
-        self.assertIn("boom", state["error"])
+        self.assertIn("RuntimeError", state["error"])
         dead = redis_client._client.xrange("trip:jobs:dead")
         self.assertEqual(len(dead), 1)
         self.assertEqual(dead[0][1]["job_id"], "job-6")

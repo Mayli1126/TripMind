@@ -54,6 +54,9 @@ class TripRequest(BaseModel):
     ] = Field(..., description="住宿偏好", example="经济型酒店")
     preferences: List[str] = Field(default_factory=list, max_length=10, description="旅行偏好标签")
     free_text_input: Optional[str] = Field(default="", max_length=1000, description="额外要求")
+    memory_context: str = Field(default='', max_length=1600, description='账号显式偏好参考；当前需求与硬约束优先')
+    conversation_id: Optional[str] = Field(default=None, max_length=100)
+    conversation_context: str = Field(default='', max_length=4200, description='本次会话摘要资料；最新需求和硬约束优先')
     travelers: int = Field(default=1, ge=1, le=20, description="出行人数")
     rooms: int = Field(default=1, ge=1, le=10, description="房间数")
     budget_limit: Optional[int] = Field(default=None, ge=0, le=1_000_000, description="总预算上限(元)")
@@ -191,9 +194,13 @@ class TransportationRequest(BaseModel):
 
 # ============ 响应模型 ============
 
+from .advisory import AttractionAdvisory
+
+
 class Attraction(BaseModel):
     """景点信息"""
     stable_id: str = Field(default="", description="计划内稳定 ID，Patch 操作据此定位，为空时由 patch_service 补全")
+    advisory: Optional[AttractionAdvisory] = None
     name: str = Field(..., description="景点名称")
     address: str = Field(..., description="地址")
     location: Location = Field(..., description="经纬度坐标")
@@ -204,7 +211,10 @@ class Attraction(BaseModel):
     photos: Optional[List[str]] = Field(default_factory=list, description="景点图片URL列表")
     poi_id: Optional[str] = Field(default="", description="POI ID")
     image_url: Optional[str] = Field(default=None, description="图片URL")
-    ticket_price: int = Field(default=0, ge=0, description="门票价格(元/人)")
+    ticket_price: Optional[int] = Field(default=None, ge=0, description="门票参考价(元/人)，未知为null，0仅代表明确免费参考")
+    ticket_price_source: str = Field(default='unknown', description='unknown/static_reference/estimate')
+    ticket_price_note: str = ''
+    amap_average_cost: Optional[float] = Field(default=None, ge=0)
     opening_time: Optional[str] = Field(default=None, description="开放时间 HH:MM")
     closing_time: Optional[str] = Field(default=None, description="闭馆时间 HH:MM")
     last_entry_time: Optional[str] = Field(default=None, description="停止入园时间 HH:MM")
@@ -232,6 +242,9 @@ class Hotel(BaseModel):
     distance: str = Field(default="", description="距离景点距离")
     type: str = Field(default="", description="酒店类型")
     estimated_cost: int = Field(default=0, ge=0, description="预估费用(元/间/晚)")
+    price_source: str = 'estimate'
+    amap_average_cost: Optional[float] = Field(default=None, ge=0)
+    price_note: str = '住宿档次预算预留，不是该酒店或入住日期的实时报价'
 
 
 class DailyRouteSummary(BaseModel):
@@ -246,6 +259,20 @@ class DailyRouteSummary(BaseModel):
     end_anchor: str = ""
     start_transfer_km: float = 0
     end_transfer_km: float = 0
+
+
+class RouteLeg(BaseModel):
+    mode: str
+    distance_km: float = Field(default=0, ge=0)
+    duration_minutes: int = Field(default=0, ge=0)
+    cost: float = Field(default=0, ge=0)
+    cost_unit: Literal["person", "vehicle"] = "person"
+    source: str = "coordinate_estimate"
+    is_estimated: bool = True
+    cost_is_estimated: bool = True
+    cost_source: str = "heuristic"
+    checked_at: str = ""
+    note: str = ""
 
 
 class ScheduleItem(BaseModel):
@@ -264,6 +291,7 @@ class ScheduleItem(BaseModel):
     start_day_offset: int = Field(default=0, ge=0, le=7)
     end_day_offset: int = Field(default=0, ge=0, le=7)
     suggested_transport: str = Field(default="", description="建议交通方式: 步行/地铁/公交/打车/专车")
+    route_leg: Optional[RouteLeg] = None
 
 
 class DayPlan(BaseModel):
@@ -320,6 +348,7 @@ class Budget(BaseModel):
     budget_limit: Optional[int] = Field(default=None, description="用户预算上限")
     over_budget: bool = Field(default=False, description="是否超出预算")
     calculation_note: str = Field(default="", description="预算计算口径")
+    unknown_ticket_count: int = 0
 
 
 class DataSource(BaseModel):
@@ -429,6 +458,7 @@ class POIInfo(BaseModel):
     address: str = Field(..., description="地址")
     location: Location = Field(..., description="经纬度坐标")
     tel: Optional[str] = Field(default=None, description="电话")
+    amap_average_cost: Optional[float] = Field(default=None, ge=0, description='高德人均消费，非门票或每间房价')
 
 
 class POISearchResponse(BaseModel):
@@ -482,13 +512,22 @@ class PlanningMetrics(BaseModel):
     total_duration_ms: Optional[int] = Field(default=None, ge=0)
     agent_duration_ms: Dict[str, int] = Field(default_factory=dict)
     degraded_agents: List[str] = Field(default_factory=list)
+    stage_duration_ms: Dict[str, int] = Field(default_factory=dict)
+    current_stage: str = ""
+    stage_started_at: Optional[str] = None
+    stage_elapsed_ms: int = 0
+    stage_visits: Dict[str, int] = Field(default_factory=dict)
+    retry_count: int = 0
+    elapsed_ms: Optional[int] = None
+    idle_ms: int = 0
+    waiting_hint: str = ""
 
 
 class PlanningJobResponse(BaseModel):
     """异步规划任务状态。"""
 
     job_id: str
-    status: Literal["queued", "running", "waiting_input", "completed", "failed"]
+    status: Literal["queued", "running", "retrying", "waiting_input", "cancelling", "cancelled", "completed", "failed"]
     progress: int = Field(default=0, ge=0, le=100)
     stage: str = "queued"
     message: str = ""
@@ -496,6 +535,15 @@ class PlanningJobResponse(BaseModel):
     error: Optional[str] = None
     agents: Dict[str, AgentExecutionState] = Field(default_factory=dict)
     metrics: PlanningMetrics = Field(default_factory=PlanningMetrics)
+    created_at: Optional[str] = None
+    started_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    trace_id: str = ''
+    worker_id: str = ''
+    run_id: str = ''
+    heartbeat_at: Optional[str] = None
+    recovery_count: int = 0
+    diagnostics: Dict[str, Any] = Field(default_factory=dict)
     # interrupt 载荷：需要用户确认的问题（类型/问题文本/选项），无等待时为 None
     waiting_input: Optional[Dict[str, Any]] = None
 
@@ -533,6 +581,7 @@ class SavedTripUpdate(BaseModel):
 
     plan: TripPlan
     change_note: str = Field(default="手动调整行程", min_length=1, max_length=500)
+    base_version: Optional[int] = Field(default=None, ge=1)
 
 
 class TripVersionSummary(BaseModel):
@@ -579,6 +628,7 @@ class UserPreferences(BaseModel):
     budget_limit: Optional[int] = Field(default=None, ge=0, le=1_000_000)
     optimization_goal: Literal["balanced", "economy", "fastest"] = "balanced"
     pace: Literal["relaxed", "balanced", "intensive"] = "balanced"
+    revision: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def validate_rooms(self):
@@ -589,12 +639,15 @@ class UserPreferences(BaseModel):
 
 class TripProgressUpdate(BaseModel):
     completed: bool
+    expected_revision: Optional[str] = None
+    base_version: Optional[int] = Field(default=None, ge=1)
 
 
 class TripProgressItem(BaseModel):
     item_key: str
     completed: bool
     completed_at: Optional[str] = None
+    revision: Optional[str] = None
 
 
 class TripProgressResponse(BaseModel):

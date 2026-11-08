@@ -95,6 +95,11 @@ class LLMClient:
             return self._direct_client
 
     def _direct_complete(self, messages: list[dict], **kwargs: Any) -> LLMResult:
+        from .provider_guard import provider_guard
+        with provider_guard.slot('llm', self.api_key, self.base_url):
+            return self._direct_complete_guarded(messages, **kwargs)
+
+    def _direct_complete_guarded(self, messages: list[dict], **kwargs: Any) -> LLMResult:
         client = self._get_direct_client()
         stream = client.chat.completions.create(
             model=self.model,
@@ -105,27 +110,37 @@ class LLMClient:
             **{k: v for k, v in kwargs.items() if k not in ("temperature", "max_tokens")},
         )
         parts: list[str] = []
-        for chunk in stream:
-            if chunk.choices:
-                parts.append(chunk.choices[0].delta.content or "")
+        with stream:
+            for chunk in stream:
+                if chunk.choices:
+                    parts.append(chunk.choices[0].delta.content or "")
         return LLMResult(content="".join(parts))
 
     # ------------------------------------------------------------------
     def invoke(self, messages: list[dict], **kwargs: Any) -> str:
         """非流式调用；代理探测失败后自动切直连流式。"""
+        from .task_trace import span
+        with span('llm','completion',model=self.model[:100]):
+            return self._invoke_untraced(messages,**kwargs)
+
+    def _invoke_untraced(self,messages,**kwargs):
         if self._proxy_broken:
             return self._direct_complete(messages, **kwargs).content
         try:
-            response = self._client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=kwargs.get("temperature", self.temperature),
-                max_tokens=kwargs.get("max_tokens", self.max_tokens),
-                **{k: v for k, v in kwargs.items() if k not in ("temperature", "max_tokens")},
-            )
-            return response.choices[0].message.content or ""
+            from .provider_guard import provider_guard
+            with provider_guard.slot('llm', self.api_key, self.base_url):
+                response = self._client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=kwargs.get("temperature", self.temperature),
+                    max_tokens=kwargs.get("max_tokens", self.max_tokens),
+                    **{k: v for k, v in kwargs.items() if k not in ("temperature", "max_tokens")},
+                )
+                return response.choices[0].message.content or ""
         except Exception as exc:
             if _is_retryable(exc):
+                from .task_trace import emit
+                emit('llm','provider_retry','retrying',reason='switch_direct',error_type=type(exc).__name__)
                 self._proxy_broken = True
                 return self._direct_complete(messages, **kwargs).content
             raise

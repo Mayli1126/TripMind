@@ -41,13 +41,30 @@ class AmapRateLimitError(RuntimeError):
     """Raised after the short local retry budget for an Amap QPS error."""
 
 
+def _parse_average_cost(item):
+    """Only structured Amap cost fields; blank/invalid is unknown, not zero."""
+    import math
+    for field in ('biz_ext', 'business'):
+        data = item.get(field)
+        value = data.get('cost') if isinstance(data, dict) else None
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            continue
+        try:
+            amount = float(value)
+            if math.isfinite(amount) and amount >= 0:
+                return amount
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
 def _normalise_cache_part(value: str) -> str:
     return re.sub(r"\s+", "", value.strip().lower())
 
 
 def _poi_cache_key(keywords: str, city: str, citylimit: bool) -> str:
     return (
-        f"amap:poi:v2:{_normalise_cache_part(city)}:"
+        f"amap:poi:v3:{_normalise_cache_part(city)}:"
         f"{_normalise_cache_part(keywords)}:{int(citylimit)}"
     )
 
@@ -56,7 +73,7 @@ def _poi_around_cache_key(
     keywords: str, location: Location, radius: int
 ) -> str:
     return (
-        f"amap:around:v2:{location.longitude:.5f}:{location.latitude:.5f}:"
+        f"amap:around:v3:{location.longitude:.5f}:{location.latitude:.5f}:"
         f"{int(radius)}:{_normalise_cache_part(keywords)}"
     )
 
@@ -78,6 +95,7 @@ def _deserialise_pois(items: Any) -> List[POIInfo]:
 
 
 def _poi_cache_read(cache_key: str) -> List[POIInfo]:
+    from ..infrastructure.task_trace import emit
     now = time.monotonic()
     with _POI_CACHE_LOCK:
         cached = _POI_MEMORY_CACHE.get(cache_key)
@@ -85,9 +103,11 @@ def _poi_cache_read(cache_key: str) -> List[POIInfo]:
             expires_at, items = cached
             if expires_at > now:
                 _POI_MEMORY_CACHE.move_to_end(cache_key)
+                emit('cache','poi_memory','lookup',hit=True)
                 return _deserialise_pois(items)
             _POI_MEMORY_CACHE.pop(cache_key, None)
 
+    emit('cache','poi_memory','lookup',hit=False)
     if not get_settings().redis_enabled:
         return []
     try:
@@ -317,6 +337,7 @@ class AmapService:
                     type=str(best.get("type", best.get("typecode", ""))),
                     address=str(best.get("address", "")),
                     location=best_location,
+                    amap_average_cost=_parse_average_cost(best),
                     tel=str(best["tel"]) if best.get("tel") else None,
                 ))
             # 其余项若自带坐标也一并返回（供调用方按名称挑选）
@@ -332,6 +353,7 @@ class AmapService:
                     type=str(item.get("type", item.get("category", ""))),
                     address=str(item.get("address", "")),
                     location=location,
+                    amap_average_cost=_parse_average_cost(item),
                     tel=str(item["tel"]) if item.get("tel") else None,
                 ))
             if not pois:
@@ -351,6 +373,24 @@ class AmapService:
         radius: int = 2000,
     ) -> List[POIInfo]:
         """One-call official POI search with L1/L2 cache and single-flight."""
+        if get_settings().cache_enabled:
+            from ..infrastructure.shared_cache import make_key
+            from ..infrastructure.cache_rebuild import cache_rebuilder
+            from .cache_policy import make_entry
+            kind = 'around' if location is not None else 'poi'
+            parameters = dict(provider='amap', api='v3/place-cost-v1', keywords=keywords.strip(),
+                              offset=20, page=1, extensions='all')
+            if location is not None:
+                # Exact request coordinate precision, no geographic rounding for cache hits.
+                parameters.update(location=f'{location.longitude},{location.latitude}', radius=int(radius))
+            else:
+                parameters.update(city=city.strip(), citylimit=bool(citylimit))
+            def load():
+                pois = self._search_poi_direct(keywords, city, citylimit, location=location,
+                                               radius=radius, allow_empty=True)
+                return make_entry(kind, _serialise_pois(pois), 'amap_v3_place', empty=not pois)
+            entry = cache_rebuilder.get(make_key(kind, parameters), load)
+            return _deserialise_pois(entry.data)
         cache_key = (
             _poi_around_cache_key(keywords, location, radius)
             if location is not None
@@ -396,6 +436,7 @@ class AmapService:
         citylimit: bool,
         location: Optional[Location] = None,
         radius: int = 2000,
+        allow_empty: bool = False,
     ) -> List[POIInfo]:
         """Call Amap's official text-search endpoint and retain ``location``.
 
@@ -427,17 +468,20 @@ class AmapService:
                 "extensions": "all",
             }
         for attempt in range(3):
-            _wait_for_amap_poi_slot()
+            from ..infrastructure.task_trace import span
+            with span('map_http','rate_limit_wait'):
+                _wait_for_amap_poi_slot()
             try:
-                response = requests.get(
-                    endpoint,
-                    params=params,
-                    timeout=12,
-                )
-                response.raise_for_status()
-                payload = response.json()
+                from ..infrastructure.task_trace import span
+                with span('map_http','poi_search',attempt=attempt):
+                    from ..infrastructure.provider_guard import map_http
+                    response = map_http(lambda: requests.get(endpoint,params=params,timeout=12))
+                    response.raise_for_status()
+                    payload = response.json()
             except (requests.RequestException, ValueError) as exc:
                 if attempt < 2:
+                    from ..infrastructure.task_trace import emit
+                    emit('map_http','poi_retry','retrying',attempt=attempt+1,error_type=type(exc).__name__)
                     time.sleep((0.18 * (2 ** attempt)) + random.uniform(0.02, 0.08))
                     continue
                 raise RuntimeError(f"高德 POI 请求失败: {exc}") from exc
@@ -454,6 +498,11 @@ class AmapService:
                     )
                 raise RuntimeError(f"高德 POI 查询失败: {message}")
 
+            items = payload.get('pois')
+            if allow_empty and isinstance(items, list) and not items:
+                return []
+            if not isinstance(items, list):
+                raise ValueError('高德 POI 响应缺少列表，不能缓存为无结果')
             pois: List[POIInfo] = []
             for item in payload.get("pois") or []:
                 if not isinstance(item, dict) or not item.get("name"):
@@ -467,6 +516,7 @@ class AmapService:
                     type=str(item.get("type", item.get("typecode", ""))),
                     address=str(item.get("address", "")),
                     location=location,
+                    amap_average_cost=_parse_average_cost(item),
                     tel=str(item["tel"]) if item.get("tel") else None,
                 ))
             if not pois:
@@ -514,6 +564,19 @@ class AmapService:
             return None
     
     def get_weather(self, city: str) -> List[WeatherInfo]:
+        if get_settings().cache_enabled:
+            from ..infrastructure.shared_cache import make_key
+            from ..infrastructure.cache_rebuild import cache_rebuilder
+            from .cache_policy import make_entry
+            def load():
+                forecasts = self._get_weather_uncached(city)
+                return make_entry('weather', [w.model_dump(mode='json') for w in forecasts], 'amap_mcp_weather')
+            entry = cache_rebuilder.get(make_key('weather', dict(provider='amap_mcp', api='maps_weather_v1',
+                city=city.strip(), forecast_type='forecast')), load)
+            return [WeatherInfo.model_validate(w) for w in entry.data]
+        return self._get_weather_uncached(city)
+
+    def _get_weather_uncached(self, city: str) -> List[WeatherInfo]:
         """
         查询天气
         

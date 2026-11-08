@@ -29,7 +29,9 @@ class _PatchedSourcesTestCase(TestCase):
         try:
             # 清空 lru_cache，避免用例间串缓存
             AttractionImageService.get_attraction_image.cache_clear()
-            return AttractionImageService().get_attraction_image("故宫博物院", "北京")
+            service = AttractionImageService()
+            service.unsplash_access_key = 'offline-fixture'
+            return service.get_attraction_image("故宫博物院", "北京")
         finally:
             for patcher in patchers:
                 patcher.stop()
@@ -93,3 +95,8 @@ class AttractionImageTests(_PatchedSourcesTestCase):
             },
         )
         self.assertEqual(result["source"], "Unsplash")
+
+    def test_failed_source_does_not_hide_successful_fallback(self):
+        result = self._run_with(wikipedia=RuntimeError('offline fixture'), commons={
+            'photo_url':'https://fixture.test/photo', 'source':'Wikimedia Commons', 'match_type':'title_match'})
+        self.assertEqual(result['source'], 'Wikimedia Commons')

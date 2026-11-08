@@ -19,6 +19,7 @@ from app.graphs.planning_graph import (
     run_planning_graph,
 )
 from app.infrastructure import redis_client
+from tests.queue_fixtures import publish_fixture
 from app.models.schemas import Budget, TripPlan, TripRequest
 from app.services import planning_worker
 from app.services.planning_job_service import RedisJobRecorder, planning_job_service
@@ -217,12 +218,12 @@ class StageETestCase(unittest.TestCase):
     # -- Worker / 任务状态层 -------------------------------------------------
 
     def test_worker_marks_waiting_input(self):
-        redis_client.enqueue_job(
+        publish_fixture(
             "job-w", "plan", {"request": _request().model_dump(mode="json")}
         )
         question = {"type": "budget_confirm", "question": "是否降级？", "progress": 90}
         with mock.patch(
-            "app.graphs.planning_graph.run_planning_graph",
+            "app.services.job_process.isolated_executor.run",
             side_effect=PlanningWaitingInput(question),
         ):
             planning_worker.process_once(block_ms=50)
@@ -236,8 +237,10 @@ class StageETestCase(unittest.TestCase):
         job_id = "job-r"
         request = _request()
         recorder = RedisJobRecorder(job_id)
-        recorder.init("plan")
-        redis_client.set_job_state(job_id, request=request.model_dump(mode="json"))
+        publish_fixture(job_id,'plan',{'request':request.model_dump(mode='json')})
+        mid,_=redis_client.dequeue_jobs(block_ms=50)[0]
+        redis_client.ack_job(mid)
+        recorder.mark_started()
         recorder.waiting_input(
             {"type": "budget_confirm", "question": "是否降级？", "progress": 90}
         )
@@ -245,22 +248,14 @@ class StageETestCase(unittest.TestCase):
         # resume 接口的服务层路径
         stored = planning_job_service.get_stored_request(job_id)
         self.assertEqual(stored.city, "北京")
-        planning_job_service.mark_resumed(job_id)
+        redis_client.resume_job(job_id,'downgrade')
         self.assertEqual(RedisJobRecorder(job_id).response().status, "queued")
         self.assertIsNone(RedisJobRecorder(job_id).response().waiting_input)
 
         # Worker 消费 resume 任务并完成
-        redis_client.enqueue_job(
-            job_id,
-            "resume",
-            {
-                "request": request.model_dump(mode="json"),
-                "resume_value": "downgrade",
-            },
-        )
         final = _plan(over_budget=False)
         with mock.patch(
-            "app.graphs.planning_graph.run_planning_graph", return_value=final
+            "app.services.job_process.isolated_executor.run", return_value=final.model_dump(mode='json')
         ):
             planning_worker.process_once(block_ms=50)
 

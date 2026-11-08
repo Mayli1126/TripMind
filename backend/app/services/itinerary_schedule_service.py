@@ -13,15 +13,21 @@ from .route_optimizer import route_optimizer
 class ItineraryScheduleService:
     """Transport occupies the clock first; meals and attractions use the remainder."""
 
-    def build(self, plan: TripPlan) -> TripPlan:
+    def build(self, plan: TripPlan, route_resolver=None, day_indexes=None) -> TripPlan:
         previous_night_location: Location | None = None
         for index, day in enumerate(plan.days):
             start_location = previous_night_location
             if start_location is None and day.hotel and day.hotel.location:
                 start_location = day.hotel.location
+            if day_indexes is not None and index not in day_indexes:
+                if day.hotel and day.hotel.location and index < len(plan.days) - 1:
+                    previous_night_location = day.hotel.location
+                elif day.attractions:
+                    previous_night_location = day.attractions[-1].location
+                continue
             day.theme = day.theme.strip() or self._derive_theme(day)
             day.schedule, ends_late = self._build_day(
-                day, plan.intercity_journey, plan.return_journey, start_location
+                day, plan.intercity_journey, plan.return_journey, start_location, route_resolver
             )
             
             # 验证行程合理性
@@ -180,6 +186,7 @@ class ItineraryScheduleService:
         outbound: IntercityJourney | None,
         return_journey: IntercityJourney | None,
         start_location: Location | None,
+        route_resolver=None,
     ) -> tuple[list[ScheduleItem], bool]:
         items: list[ScheduleItem] = []
         meals = {meal.type: meal for meal in day.meals}
@@ -228,7 +235,8 @@ class ItineraryScheduleService:
 
         lunch_added = bool(arrival_day and current >= 14 * 60)
         dinner_added = False
-        current_location = start_location
+        # Station coordinates are not known: do not mislabel hotel as arrival origin.
+        current_location = None if arrival_day else start_location
 
         # 按时间约束重排景点：白天项目优先，夜间项目置后，
         # 防止 route_optimizer 的距离排序把博物馆挤到晚餐之后。
@@ -237,6 +245,15 @@ class ItineraryScheduleService:
         for index, attraction in enumerate(day.attractions):
             duration = max(45, min(attraction.visit_duration, 240))
             travel_minutes = self._travel_minutes(current_location, attraction.location)
+            route_start = current
+            leg = route_resolver.resolve(current_location, attraction.location, day.date,
+                                         self._time(current), day.transportation) if route_resolver else None
+            if leg:
+                travel_minutes = leg.duration_minutes
+                # Arrival block already reserves the first local connector; do not double count.
+                if arrival_day and current_location is None:
+                    travel_minutes = 0
+                    leg = None
             if attraction.opening_time:
                 try:
                     opening = self._minutes(attraction.opening_time)
@@ -285,14 +302,26 @@ class ItineraryScheduleService:
 
             # 插入午/晚餐后需重新检查当日截止时间，避免先判断可放入、
             # 再因用餐顺延成深夜游览。
+            if leg and current != route_start:
+                leg = route_resolver.resolve(current_location, attraction.location, day.date,
+                                             self._time(current), day.transportation)
+                travel_minutes = leg.duration_minutes
             if current + travel_minutes + duration > station_leave:
                 continue
+            if latest_entry:
+                try:
+                    if current + travel_minutes > self._minutes(latest_entry):
+                        continue
+                except (ValueError, TypeError):
+                    pass
 
             current = self._append(
                 items, day, current, travel_minutes, "transport", f"前往 {attraction.name}",
                 f"预计路上约 {travel_minutes} 分钟", attraction.address,
                 notes="基于坐标估算；实时路况以导航为准",
             )
+            if leg:
+                self._attach_leg(items[-1], leg)
             current = self._append(
                 items, day, current, duration, "attraction", attraction.name,
                 attraction.description, attraction.address, related_index=index,
@@ -329,12 +358,25 @@ class ItineraryScheduleService:
 
         if day.hotel:
             return_minutes = self._travel_minutes(current_location, day.hotel.location)
+            leg = route_resolver.resolve(current_location, day.hotel.location, day.date,
+                                         self._time(current), day.transportation) if route_resolver else None
+            if leg:
+                return_minutes = leg.duration_minutes
             current = self._append(
                 items, day, current, return_minutes, "hotel", f"返回酒店 · {day.hotel.name}",
                 "办理入住或返回休息", day.hotel.address,
                 notes="已按最后一个景点到酒店的坐标距离估算；实时路况请以导航为准",
             )
+            if leg:
+                self._attach_leg(items[-1], leg)
         return items, current > 22 * 60
+
+    @staticmethod
+    def _attach_leg(item, leg):
+        item.route_leg = leg
+        item.suggested_transport = {"walking": "步行", "transit": "公交/地铁", "driving": "驾车"}[leg.mode]
+        item.description = f"{item.suggested_transport} · 约{leg.distance_km:g}公里 · {leg.duration_minutes}分钟"
+        item.notes = f"{leg.note}；约¥{leg.cost:g}/{'车' if leg.cost_unit == 'vehicle' else '人'}"
 
     def _append_same_day_outbound(self, items, day, journey, breakfast) -> int:
         departure = self._minutes(journey.departure_time)

@@ -4,7 +4,7 @@
       <div>
         <span class="eyebrow">PERSONAL TRIP LIBRARY</span>
         <h1>我的行程</h1>
-        <p>计划会保存在这台设备上。随时回来查看、继续修改，或者恢复到之前的版本。</p>
+        <p>计划保存在你的账号中。随时回来查看、对话修改，或者恢复到之前的版本。</p>
       </div>
       <router-link to="/#planner" class="new-trip">＋ 规划新旅行</router-link>
     </section>
@@ -41,6 +41,7 @@
               </div>
             </div>
           </router-link>
+          <router-link class="assistant-link" :to="`/trips/${trip.id}/assistant`">✦ 问这份行程 / 对话修改 →</router-link>
           <button class="delete-button" aria-label="删除行程" @click="removeTrip(trip.id, trip.title)">删除</button>
         </article>
       </div>
@@ -111,6 +112,7 @@ const removeTrip = (id: string, title: string) => {
 </script>
 
 <style scoped>
+.assistant-link { display: block; padding: 14px 22px; border-top: 1px solid #edf0f4; color: #168da5; background: #f1fbfc; font-weight: 700; }
 .trips-page { min-height: calc(100vh - 166px); background: #f6f8fb; }
 .trips-hero { min-height: 280px; padding: 64px max(28px, calc((100vw - 1180px) / 2)); display: flex; align-items: end; justify-content: space-between; gap: 30px; color: white; background: radial-gradient(circle at 80% 20%, rgba(255,126,99,.32), transparent 28%), #14213d; }
 .eyebrow { color: #ff9a83; font-size: 11px; font-weight: 900; letter-spacing: 2px; }

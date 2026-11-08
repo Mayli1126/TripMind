@@ -1,135 +1,152 @@
-"""Redis 任务 Worker：消费 trip:jobs Stream，执行规划/修订图。
-
-- 与 API 同进程时由 main.py startup 拉起守护线程（单实例部署）；
-- 也可独立运行（python -m app.services.planning_worker）支持多实例；
-- 失败任务退避重试（trip:retry ZSET），超过 3 次进死信 trip:jobs:dead；
-- waiting_input / completed / failed 均 XACK（状态已持久化在 Redis/Checkpointer）。
-"""
-
+"""Redis supervisor: fenced lease, heartbeat, pending recovery and isolated execution."""
 from __future__ import annotations
-
 import json
 import threading
-from typing import Any, Optional
-
+import time
+from uuid import uuid4
 from ..infrastructure import redis_client
 from ..models.schemas import TripPlan, TripRequest
 
-_STOP = threading.Event()
-_THREAD: Optional[threading.Thread] = None
+_STOP=threading.Event()
+_THREAD=None
+_LAST_RECLAIM=0.0
 
 
-def _execute(message_id: str, fields: dict[str, Any]) -> None:
-    # 延迟导入，避免模块导入期拉起 MCP/Agent。
-    from ..agents.trip_planner_agent import get_trip_planner_agent
-    from ..graphs.planning_graph import PlanningWaitingInput, run_planning_graph
+def worker_status():
+    return {"running":_THREAD is not None and _THREAD.is_alive() and not _STOP.is_set(),
+            "consumer":redis_client._CONSUMER,"lease_seconds":45,"reclaim_idle_seconds":60}
+
+
+def _execute(message_id, fields, recovered=False):
+    from ..graphs.planning_graph import PlanningWaitingInput
     from .planning_job_service import RedisJobRecorder
-
-    # 坏消息防护：缺关键字段时直接 ACK 丢弃，否则会无限重投刷日志
+    from .job_process import isolated_executor, JobCancelled, ExecutorStopped
     try:
-        job_id = fields["job_id"]
-        job_type = fields["type"]
-        payload = json.loads(fields["payload"])
-    except (KeyError, TypeError, json.JSONDecodeError) as exc:
-        print(f"⚠️ 丢弃无法解析的任务消息 {message_id}: {exc}")
+        job_id=fields["job_id"]; job_type=fields["type"]; payload=json.loads(fields["payload"])
+        attempt=int(payload.get("attempt",0))
+    except (KeyError,ValueError,TypeError):
         redis_client.ack_job(message_id)
         return
-    attempt = int(payload.get("attempt", 0))
-
-    # resume 幂等保护：重复的 resume 消息（双击/多标签页）到达时任务可能已完成，
-    # 对已终结的 thread 再 resume 必然异常并走进重试→failed，会把 completed 覆盖成失败
-    if job_type == "resume":
-        state = redis_client.get_job_state(job_id) or {}
-        if state.get("status") in {"completed", "failed"}:
-            print(f"⚠️ 任务 {job_id} 已 {state.get('status')}，忽略重复 resume 消息")
-            redis_client.ack_job(message_id)
-            return
-
-    recorder = RedisJobRecorder(job_id)
-    recorder.mark_started()
+    state=redis_client.get_job_state(job_id) or {}
+    if not state or state.get("status") in {"completed","failed","cancelled"}:
+        redis_client.ack_job(message_id); return
+    if state.get("status")=="waiting_input" and job_type!="resume":
+        redis_client.ack_job(message_id); return
+    if state.get("status")=="retrying" and attempt<=int(state.get('attempt') or 0):
+        # A crash after scheduling a retry must not execute both copies.
+        redis_client.ack_job(message_id); return
+    token=uuid4().hex
+    if not redis_client.acquire_job_lease(job_id,token):
+        return  # Leave PEL entry intact until its live owner finishes or expires.
+    recorder=RedisJobRecorder(job_id,token)
+    acknowledge=False
     try:
-        # from_storage：任务可能在 waiting_input 停留过夜，重建时跳过
-        # "出发日期不能早于今天"校验（否则次日 resume 必然 ValidationError 降级模板）
-        request = TripRequest.model_validate(
-            payload["request"], context={"from_storage": True}
-        )
-        if job_type == "plan":
-            result = run_planning_graph(request, recorder.callback(), job_id=job_id)
-        elif job_type == "resume":
-            # 从 Checkpointer 断点恢复（interrupt 之后），不重算 research/plan
-            result = run_planning_graph(
-                request,
-                recorder.callback(),
-                job_id=job_id,
-                resume_value=payload.get("resume_value"),
-            )
-        elif job_type == "revision":
-            plan = TripPlan.model_validate_json(payload["plan"])
-            # 阶段1批1：修订走 RevisionGraph（PlanPatch 局部修改），
-            # 解析失败/超范围时图内部回退 legacy revise_trip。
-            from ..graphs.revision_graph import run_revision_graph
-
-            result = run_revision_graph(
-                request, plan, payload["instruction"], recorder.callback(),
-                base_version=payload.get("base_version"),
-            )
+        from ..config import get_settings
+        # Legacy outstanding jobs have no admission record: require draining before rollout.
+        if float(state.get('admission_until') or 0) <= time.time():
+            recorder.fail('任务等待或确认时间已过期，请重新提交')
+            acknowledge=True; return
+        if not recovered and time.time()-float(state.get('queued_at') or 0) > get_settings().job_max_queue_wait_seconds:
+            recorder.fail('任务排队超时，请稍后重新提交')
+            acknowledge=True; return
+        if state.get("status")=="cancelling":
+            recorder.cancel(); acknowledge=True; return
+        recovery_count=int(state.get("recovery_count") or 0)+(1 if recovered else 0)
+        if recovery_count>3:
+            recorder.fail("任务多次异常退出，请使用任务编号联系管理员。")
+            acknowledge=True; return
+        redis_client.set_job_state(job_id,recovery_count=recovery_count)
+        if not redis_client.heartbeat_job(job_id,token,message_id):
+            return
+        recorder.mark_started(attempt)
+        if recovered:
+            recorder.diagnostic(dict(trace_id=job_id,run_id=token,service="runtime",operation="recovery",
+                status="started",reason="pending_message_reclaimed",attempt=recovery_count))
+        def cancelled():
+            return (redis_client.get_job_state(job_id) or {}).get("status") in {"cancelling","cancelled"}
+        def heartbeat():
+            return redis_client.heartbeat_job(job_id,token,message_id)
+        value=isolated_executor.run(dict(job_id=job_id,run_id=token,type=job_type,payload=payload,
+            redis=True,recover=recovered),recorder.callback(),recorder.diagnostic,cancelled,heartbeat,_STOP.is_set)
+        if cancelled():
+            recorder.cancel()
         else:
-            raise ValueError(f"未知任务类型: {job_type}")
-        recorder.complete(result)
+            recorder.complete(TripPlan.model_validate(value))
+        acknowledge=True
     except PlanningWaitingInput as wait:
-        # 用户确认点：状态置 waiting_input，断点保留在 Checkpointer，XACK 等恢复
-        recorder.waiting_input(wait.question)
+        recorder.waiting_input(wait.question); acknowledge=True
+    except JobCancelled:
+        recorder.cancel(); acknowledge=True
+    except ExecutorStopped:
+        # Shutdown/lost lease: do not ACK. Another supervisor reclaims the PEL entry.
+        pass
     except Exception as exc:
-        print(f"❌ 任务 {job_id} 第 {attempt + 1} 次执行失败: {exc}")
-        will_retry = redis_client.schedule_retry(job_id, job_type, payload, attempt)
-        if will_retry:
-            recorder.update(0, "retrying", "执行失败，已加入重试队列", "retrying")
-        else:
-            recorder.fail(str(exc))
+        if redis_client.owns_job_lease(job_id,token):
+            if (redis_client.get_job_state(job_id) or {}).get("status")=="cancelling":
+                recorder.cancel()
+            else:
+                recorder.diagnostic(dict(trace_id=job_id,run_id=token,service="runtime",operation="execute",
+                    status="failed",error_type=getattr(exc,'error_type',type(exc).__name__)))
+                if redis_client.schedule_retry(job_id,job_type,payload,attempt):
+                    recorder.update(0,"retrying","执行中断，已安排自动重试","retrying")
+                else:
+                    recorder.fail(f"执行失败（{type(exc).__name__}），任务编号 {job_id}")
+            acknowledge=True
     finally:
-        redis_client.ack_job(message_id)
+        # Only ACK while fenced; an old worker can never consume its replacement's message.
+        if acknowledge and redis_client.owns_job_lease(job_id,token):
+            if (redis_client.get_job_state(job_id) or {}).get('status')=='cancelling':
+                recorder.cancel()
+            redis_client.ack_job(message_id)
+        redis_client.release_job_lease(job_id,token)
 
 
-def process_once(block_ms: int = 0) -> int:
-    """处理一批到期任务（重试 + 新消息），返回处理条数。供测试与单步调试。"""
-    handled = 0
-    for item in redis_client.pop_due_retries():
-        redis_client.enqueue_job(item["job_id"], item["type"], item["payload"])
-    for message_id, fields in redis_client.dequeue_jobs(block_ms=block_ms):
-        _execute(message_id, fields)
-        handled += 1
+def process_once(block_ms=0):
+    global _LAST_RECLAIM
+    redis_client.pop_due_retries()  # Atomic promotion into the stream, no second enqueue.
+    entries=[]
+    if time.monotonic()-_LAST_RECLAIM>=5:
+        _LAST_RECLAIM=time.monotonic()
+        entries=redis_client.reclaim_jobs()
+    handled=0
+    for mid,fields in entries:
+        _execute(mid,fields,recovered=True); handled+=1
+        if _STOP.is_set():
+            return handled
+    for mid,fields in redis_client.dequeue_jobs(block_ms=block_ms):
+        _execute(mid,fields); handled+=1
     return handled
 
 
-def _run_loop() -> None:
+def _run_loop():
+    from ..infrastructure.task_trace import log
     while not _STOP.is_set():
         try:
             process_once(block_ms=2000)
-        except Exception as exc:  # Redis 抖动时退避后继续
-            print(f"⚠️ Worker 循环异常，1s 后重试: {exc}")
-            _STOP.wait(1.0)
+        except Exception as exc:
+            log({"service":"worker","status":"failed","error_type":type(exc).__name__})
+            _STOP.wait(1)
 
 
-def start_worker() -> None:
+def start_worker():
     global _THREAD
     if _THREAD is not None and _THREAD.is_alive():
         return
-    redis_client.ensure_group()
-    _STOP.clear()
-    _THREAD = threading.Thread(target=_run_loop, daemon=True, name="trip-planning-worker")
+    redis_client.ensure_group(); _STOP.clear()
+    _THREAD=threading.Thread(target=_run_loop,daemon=True,name="trip-planning-worker")
     _THREAD.start()
-    print("✅ Redis 规划 Worker 已启动")
 
 
-def stop_worker() -> None:
+def stop_worker():
     global _THREAD
     _STOP.set()
     if _THREAD is not None:
-        _THREAD.join(timeout=5)
-        _THREAD = None
+        _THREAD.join(timeout=15)
+        if not _THREAD.is_alive():
+            _THREAD=None
 
 
-if __name__ == "__main__":  # 独立多实例运行入口
+if __name__=="__main__":
     start_worker()
     try:
         while _THREAD and _THREAD.is_alive():

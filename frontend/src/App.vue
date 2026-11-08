@@ -11,8 +11,12 @@
         <router-link to="/">首页</router-link>
         <router-link to="/guide">攻略导入</router-link>
         <router-link to="/trips">我的行程</router-link>
+        <router-link to="/conversations">历史对话</router-link>
+        <router-link to="/memories">旅行偏好</router-link>
         <a href="/#planner">开始规划</a>
       </nav>
+
+      <div v-if="authState.user" class="account-menu"><router-link v-if="authState.user.role === 'admin'" to="/admin">管理中心</router-link><span>{{ authState.user.username }}</span><button @click="logout" :disabled="loggingOut">退出</button></div>
 
     </header>
 
@@ -30,7 +34,19 @@
 </template>
 
 <script setup lang="ts">
-import { ConfigProvider as AConfigProvider } from 'ant-design-vue'
+import { ConfigProvider as AConfigProvider, message } from 'ant-design-vue'
+import { ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { authState, signOut } from './services/auth'
+
+const router = useRouter()
+const loggingOut = ref(false)
+const logout = async () => {
+  loggingOut.value = true
+  try { await signOut(); await router.replace('/login') }
+  catch { message.error('暂时无法退出，请检查网络后再试。') }
+  finally { loggingOut.value = false }
+}
 
 const theme = {
   token: {
@@ -83,6 +99,10 @@ button, input, textarea, select { font: inherit; }
 .main-nav a { position: relative; padding: 26px 0 23px; color: #667287; font-size: 13px; font-weight: 700; text-decoration: none; }
 .main-nav a:hover, .main-nav .router-link-active { color: #14213d; }
 .main-nav a:hover::after, .main-nav .router-link-active::after { content: ""; position: absolute; left: 0; right: 0; bottom: 17px; height: 2px; background: #ff6b4a; }
+.account-menu { display: flex; align-items: center; gap: 12px; font-size: 11px; color: #8b9ca6; white-space: nowrap; }
+.account-menu a { color: #4a8a9b; text-decoration: none; }
+.account-menu button { border: 0; border-radius: 15px; background: #f0f5f7; padding: 6px 10px; color: #859aa5; cursor: pointer; }
+@media(max-width:720px) { .account-menu { margin-left: auto; gap: 10px; } }
 
 .header-status { display: flex; align-items: center; gap: 8px; padding: 8px 11px; border: 1px solid #dfeae5; border-radius: 999px; color: #39755e; background: #f4fbf8; font-size: 10px; font-weight: 800; letter-spacing: .7px; }
 .header-status span { width: 7px; height: 7px; border-radius: 50%; background: #21a179; box-shadow: 0 0 0 4px rgba(33, 161, 121, .12); }

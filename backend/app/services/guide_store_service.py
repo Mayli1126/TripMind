@@ -91,7 +91,7 @@ class GuideStoreService:
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     # ------------------------------------------------------------------
-    def create_record(self, source: GuideInput, source_id: Optional[str] = None) -> GuideSourceRecord:
+    def create_record(self, source: GuideInput, source_id: Optional[str] = None, owner_id: str | None = None) -> GuideSourceRecord:
         """先落一条 pending 记录占住 source_id，解析结果稍后回填。"""
         record = GuideSourceRecord(
             id=source_id or f"guide-{uuid4().hex[:12]}",
@@ -110,12 +110,15 @@ class GuideStoreService:
                 (record.id, record.input_type, record.source_url, record.title,
                  record.content_hash, record.parse_status, record.created_at),
             )
+            if owner_id:
+                connection.execute("INSERT INTO resource_owners VALUES ('guide', ?, ?, ?)",
+                                   (record.id, owner_id, int(datetime.now(timezone.utc).timestamp())))
         return record
 
     def save_result(self, source_id: str, result: GuideParseResult) -> GuideSourceRecord:
         """回填解析结果；成功时同步写入 guide_facts（先清旧事实保证幂等）。"""
         with self._lock, self._connection() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """UPDATE guide_sources
                    SET parse_status=?, error_message=?, title=?, result_json=?
                    WHERE id=?""",
@@ -123,6 +126,8 @@ class GuideStoreService:
                  result.model_dump_json() if result.parse_status == "parsed" else None,
                  source_id),
             )
+            if not cursor.rowcount:
+                raise KeyError(source_id)
             connection.execute("DELETE FROM guide_facts WHERE source_id=?", (source_id,))
             if result.parse_status == "parsed":
                 for fact in result.facts:
@@ -150,19 +155,18 @@ class GuideStoreService:
         选择存进 result_json 的候选对象上，聚合接口即刻反映，跨设备一致。
         未知 candidate_id 静默跳过（候选可能已被合并/删除）。
         """
-        record = self.get_record(source_id)
-        if record is None or record.result is None:
-            return None
-        valid = {"required", "preferred", "optional", "excluded"}
-        updated = 0
-        for candidate in record.result.candidates:
-            choice = choices.get(candidate.candidate_id)
-            if choice in valid:
-                candidate.user_choice = choice  # type: ignore[assignment]
-                updated += 1
-        if not updated:
-            return record
         with self._lock, self._connection() as connection:
+            # Read/merge/write under a database lock, not just this instance's Python lock.
+            connection.execute('BEGIN IMMEDIATE')
+            row = connection.execute('SELECT * FROM guide_sources WHERE id=?', (source_id,)).fetchone()
+            record = self._record_from_row(row) if row else None
+            if record is None or record.result is None:
+                return None
+            valid = {"required", "preferred", "optional", "excluded"}
+            for candidate in record.result.candidates:
+                choice = choices.get(candidate.candidate_id)
+                if choice in valid:
+                    candidate.user_choice = choice  # type: ignore[assignment]
             connection.execute(
                 "UPDATE guide_sources SET result_json=? WHERE id=?",
                 (record.result.model_dump_json(), source_id),
@@ -176,11 +180,13 @@ class GuideStoreService:
             cursor = connection.execute("DELETE FROM guide_sources WHERE id=?", (source_id,))
         return cursor.rowcount > 0
 
-    def list_records(self, limit: int = 50) -> list[GuideSourceRecord]:
+    def list_records(self, limit: int = 50, owner_id: str | None = None) -> list[GuideSourceRecord]:
         with self._lock, self._connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM guide_sources ORDER BY created_at DESC, id DESC LIMIT ?",
-                (limit,),
+                "SELECT * FROM guide_sources"
+                + (" WHERE id IN (SELECT resource_id FROM resource_owners WHERE kind='guide' AND owner_id=?)" if owner_id else "")
+                + " ORDER BY created_at DESC, id DESC LIMIT ?",
+                (owner_id, limit) if owner_id else (limit,),
             ).fetchall()
         return [self._record_from_row(row) for row in rows]
 

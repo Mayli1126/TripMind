@@ -13,6 +13,8 @@ export interface Location {
 }
 
 export interface Attraction {
+  amap_average_cost?: number | null
+  advisory?: AttractionAdvisory | null
   name: string
   address: string
   location: Location
@@ -23,11 +25,29 @@ export interface Attraction {
   image_url?: string
   photos?: string[]
   poi_id?: string
-  ticket_price?: number
+  ticket_price?: number | null
+  ticket_price_source?: string
+  ticket_price_note?: string
   opening_time?: string
   closing_time?: string
   last_entry_time?: string
   closed_weekdays?: number[]
+}
+
+export interface AttractionAdvisory {
+  reservation_channel?: string
+  reservation_url?: string
+  opening_hours_note?: string
+  opening_checked_at?: string | null
+  opening_expires_at?: string | null
+  refresh_errors?: string[]
+  reservation_required: 'true' | 'false' | 'unknown'
+  closure_rules: string[]
+  pitfall_tips: string[]
+  source_refs: string[]
+  fact_status: 'verified' | 'estimated' | 'unverified'
+  verified_at?: string | null
+  expires_at?: string | null
 }
 
 export interface Meal {
@@ -40,6 +60,9 @@ export interface Meal {
 }
 
 export interface Hotel {
+  price_source?: string
+  price_note?: string
+  amap_average_cost?: number | null
   name: string
   address: string
   location?: Location
@@ -63,6 +86,7 @@ export interface DailyRouteSummary {
 }
 
 export interface ScheduleItem {
+  route_leg?: { mode: string; distance_km: number; duration_minutes: number; cost: number; cost_unit: 'person' | 'vehicle'; source: string; is_estimated: boolean; cost_is_estimated: boolean; cost_source: string; checked_at: string; note: string }
   start_time: string
   end_time: string
   item_type: 'meal' | 'transport' | 'attraction' | 'hotel' | 'break'
@@ -88,6 +112,7 @@ export interface OptimizationSummary {
 }
 
 export interface Budget {
+  unknown_ticket_count?: number
   total_attractions: number
   total_hotels: number
   total_meals: number
@@ -183,6 +208,8 @@ export interface TripFormData {
   accommodation: string
   preferences: string[]
   free_text_input: string
+  conversation_id?: string | null
+  conversation_context?: string
   travelers: number
   rooms: number
   budget_limit?: number
@@ -194,13 +221,27 @@ export interface TripFormData {
   ask_route_options?: boolean
 }
 
+export interface PlannerChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface PlannerChatResponse {
+  conversation_summary?: import('../services/conversations').ConversationSummary | null
+  reply: string
+  suggestions: string[]
+  draft: Partial<TripFormData> & { preferences_confirmed?: boolean }
+  ready: boolean
+  request?: TripFormData | null
+}
+
 export interface TripPlanResponse {
   success: boolean
   message: string
   data?: TripPlan
 }
 
-export type PlanningJobStatus = 'queued' | 'running' | 'waiting_input' | 'completed' | 'failed'
+export type PlanningJobStatus = 'queued' | 'running' | 'retrying' | 'waiting_input' | 'cancelling' | 'cancelled' | 'completed' | 'failed'
 
 // interrupt 载荷：需要用户确认的问题（当前仅预算确认 budget_confirm 类型）
 export interface WaitingInputOption {
@@ -218,6 +259,12 @@ export interface WaitingInputPayload {
 }
 
 export interface PlanningJobResponse {
+  trace_id?: string
+  worker_id?: string
+  run_id?: string
+  heartbeat_at?: string | null
+  recovery_count?: number
+  diagnostics?: { services?: Record<string, {started:number; completed:number; failed:number; hits:number; misses:number; duration_ms:number; retrying?:number; degraded?:number}>; active_calls?: Record<string,{service:string; operation:string; timestamp:string}>; events?: Record<string,any>[] }
   job_id: string
   status: PlanningJobStatus
   progress: number
@@ -227,6 +274,9 @@ export interface PlanningJobResponse {
   error?: string
   agents: Record<string, AgentExecutionState>
   metrics: PlanningMetrics
+  created_at?: string | null
+  started_at?: string | null
+  updated_at?: string | null
   waiting_input?: WaitingInputPayload | null
 }
 
@@ -241,6 +291,15 @@ export interface PlanningMetrics {
   total_duration_ms?: number
   agent_duration_ms: Record<string, number>
   degraded_agents: string[]
+  stage_duration_ms?: Record<string, number>
+  current_stage?: string
+  stage_started_at?: string | null
+  stage_elapsed_ms?: number
+  stage_visits?: Record<string, number>
+  retry_count?: number
+  elapsed_ms?: number | null
+  idle_ms?: number
+  waiting_hint?: string
 }
 
 export interface PlanningProgressEvent {
@@ -292,6 +351,7 @@ export interface SavedTripDetail extends SavedTripSummary {
 }
 
 export interface UserPreferences {
+  revision?: number
   origin_city: string
   transportation: string
   accommodation: string
@@ -304,6 +364,7 @@ export interface UserPreferences {
 }
 
 export interface TripProgressItem {
+  revision?: string | null
   item_key: string
   completed: boolean
   completed_at?: string

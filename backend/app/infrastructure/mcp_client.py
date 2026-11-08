@@ -14,10 +14,10 @@ from __future__ import annotations
 import asyncio
 import itertools
 import threading
-from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
 
 from ..config import get_settings
+from .mcp_runtime import amap_runtime
 
 
 class _LoopThread:
@@ -34,91 +34,132 @@ class _LoopThread:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         self._started.set()
-        self._loop.run_forever()
+        try:
+            self._loop.run_forever()
+        finally:
+            self._loop.close()
 
     def submit(self, coro, timeout: float = 120.0) -> Any:
         if self._loop is None or self._loop.is_closed():
             raise RuntimeError("MCP 事件循环不可用")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=timeout)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            raise
 
     def stop(self) -> None:
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
+            if threading.current_thread() is not self._thread:
+                self._thread.join(timeout=5)
 
 
 class _StdioSession:
-    """单个长生命周期 stdio MCP 会话。"""
+    """A single owner task opens/closes MCP contexts and serializes tool calls."""
 
-    def __init__(self, command: List[str], env: Dict[str, str]) -> None:
-        self._command = command
-        self._env = env
-        self._lock = asyncio.Lock()
-        self._contexts: tuple = ()
+    def __init__(self, command: List[str], env: Dict[str, str], startup_timeout=120) -> None:
+        self._command, self._env = command, env
+        self._startup_timeout = startup_timeout
+        self._startup_lock = asyncio.Lock()
+        self._owner = None
+        self._ready = None
+        self._requests = asyncio.Queue()
         self.session = None
         self.tools: List[Dict[str, Any]] = []
 
+    @property
+    def ready(self):
+        return bool(self.tools and self._owner and not self._owner.done())
+
     async def ensure_started(self) -> None:
-        if self.session is not None:
-            return
+        async with self._startup_lock:
+            if not self._owner or self._owner.done():
+                self._ready = asyncio.get_running_loop().create_future()
+                # A timed-out waiter may be gone when startup finally fails.
+                self._ready.add_done_callback(lambda future: future.exception() if not future.cancelled() else None)
+                self._owner = asyncio.create_task(self._serve())
+            await asyncio.shield(self._ready)
+
+    async def _serve(self):
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
+        pending = None
         params = StdioServerParameters(command=self._command[0], args=self._command[1:], env=self._env)
-        # 上下文必须保持打开状态，退出时逆序关闭。
-        stack = AsyncExitStack()
-        read_stream, write_stream = await stack.enter_async_context(stdio_client(params))
-        session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-        await session.initialize()
-        self._contexts = (stack,)
-        self.session = session
-        await self._refresh_tools()
-
-    async def _refresh_tools(self) -> None:
-        result = await self.session.list_tools()
-        self.tools = [
-            {
-                "name": tool.name,
-                "description": tool.description or "",
-                "input_schema": tool.inputSchema or {},
-            }
-            for tool in result.tools
-        ]
+        try:
+            # Context enter/exit happen in this same task (required by AnyIO).
+            async with stdio_client(params) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    async with asyncio.timeout(self._startup_timeout):
+                        await session.initialize()
+                        result = await session.list_tools()
+                    tools = [{"name": tool.name, "description": tool.description or "",
+                              "input_schema": tool.inputSchema or {}} for tool in result.tools]
+                    if not tools:
+                        raise RuntimeError("地图服务未返回可用工具")
+                    self.session, self.tools = session, tools
+                    self._ready.set_result(None)
+                    while True:
+                        tool_name, arguments, pending = await self._requests.get()
+                        if pending.cancelled():
+                            continue
+                        from .provider_guard import provider_guard, ProviderBusyError
+                        try:
+                            async with provider_guard.async_slot('amap', self._env.get('AMAP_MAPS_API_KEY', '')) as permit:
+                                result = await asyncio.wait_for(session.call_tool(tool_name, arguments), 180)
+                                await asyncio.to_thread(provider_guard.inspect_map, permit, result)
+                        except ProviderBusyError as exc:
+                            if not pending.done():
+                                pending.set_exception(exc)
+                            pending = None
+                            continue
+                        parts = [item.text for item in result.content or [] if getattr(item, "text", None)]
+                        if not pending.done():
+                            pending.set_result("\n".join(parts))
+                        pending = None
+        except BaseException as exc:
+            error = RuntimeError(f"地图工具会话未就绪或已中断（{type(exc).__name__}）")
+            if not self._ready.done():
+                self._ready.set_exception(error)
+            if pending is not None and not pending.done():
+                pending.set_exception(error)
+            while not self._requests.empty():
+                _, _, response = self._requests.get_nowait()
+                if not response.done():
+                    response.set_exception(error)
+        finally:
+            self.session = None
+            self.tools = []
 
     async def call(self, tool_name: str, arguments: Dict[str, Any]) -> str:
-        async with self._lock:
+        for attempt in range(2):
             await self.ensure_started()
+            response = asyncio.get_running_loop().create_future()
+            self._requests.put_nowait((tool_name, arguments, response))
             try:
-                result = await self.session.call_tool(tool_name, arguments)
-            except Exception:
-                # 会话可能已失效：关闭并重建一次。
+                return await response
+            except RuntimeError as exc:
+                from .provider_guard import ProviderBusyError
+                if isinstance(exc, ProviderBusyError):
+                    raise
+                if attempt:
+                    raise
                 await self.close()
-                await self.ensure_started()
-                result = await self.session.call_tool(tool_name, arguments)
-        parts: list[str] = []
-        for item in result.content or []:
-            text = getattr(item, "text", None)
-            if text:
-                parts.append(text)
-        return "\n".join(parts) if parts else ""
+        raise RuntimeError("地图工具会话不可用")
 
     async def close(self) -> None:
-        if self.session is None:
-            return
-        self.session = None
-        self.tools = []
-        stack, self._contexts = self._contexts, ()
-        if stack is not None:
-            try:
-                await stack.aclose()
-            except Exception:
-                pass
+        if self._owner and not self._owner.done():
+            self._owner.cancel()
+        if self._owner:
+            await self._owner
 
 
 class MCPClientManager:
     """管理一组 stdio MCP 会话，提供线程安全的同步调用。"""
 
-    def __init__(self, command: List[str], env: Dict[str, str], pool_size: int = 4) -> None:
+    def __init__(self, command: List[str], env: Dict[str, str], pool_size: int = 4, startup_timeout: int = 120) -> None:
         self._command = command
         self._env = env
         self._pool_size = max(pool_size, 1)
@@ -127,24 +168,40 @@ class MCPClientManager:
         self._lock = threading.Lock()
         self._counter = itertools.count()
         self._closed = False
+        self._startup_timeout = startup_timeout
 
     def _get_session(self, index: int) -> _StdioSession:
         with self._lock:
             if self._closed:
                 raise RuntimeError("MCP 管理器已关闭")
             while len(self._sessions) <= index:
-                self._sessions.append(_StdioSession(self._command, self._env))
+                self._sessions.append(_StdioSession(self._command, self._env, self._startup_timeout))
             return self._sessions[index]
 
     def call_tool(self, tool_name: str, arguments: Dict[str, Any], session_hint: int = 0) -> str:
         index = next(self._counter) % self._pool_size if session_hint <= 0 else session_hint - 1
         session = self._get_session(index)
-        return self._loop.submit(session.call(tool_name, arguments), timeout=180.0)
+        from .task_trace import span
+        with span('map_mcp','tool',reason=tool_name):
+            return self._loop.submit(session.call(tool_name, arguments), timeout=self._startup_timeout + 185.0)
 
     def list_tools(self, session_hint: int = 1) -> List[Dict[str, Any]]:
         session = self._get_session(max(session_hint, 1) - 1)
-        self._loop.submit(session.ensure_started(), timeout=120.0)
+        from .task_trace import span
+        with span('map_mcp','initialize'):
+            self._loop.submit(session.ensure_started(), timeout=self._startup_timeout + 5.0)
         return session.tools
+
+    def warmup(self):
+        # Cold uv processes previously competed for cache locks: prepare sequentially.
+        for index in range(self._pool_size):
+            tools = self.list_tools(session_hint=index + 1)
+            print(f"地图工具已就绪：会话 {index + 1}/{self._pool_size}，{len(tools)} 个工具")
+
+    def status(self):
+        with self._lock:
+            count = sum(session.ready for session in self._sessions)
+        return {"ready": count == self._pool_size, "ready_sessions": count, "pool_size": self._pool_size}
 
     def stop(self) -> None:
         with self._lock:
@@ -172,19 +229,17 @@ def get_amap_manager() -> MCPClientManager:
             settings = get_settings()
             if not settings.amap_api_key:
                 raise ValueError("高德地图API Key未配置,请在.env文件中设置AMAP_API_KEY")
-            # 锁版本原因见原 mcp_tool_pool 注释：
-            # mcp<2（FastMCP 改名）、pydantic 2.13.x（eval_type_backport 被删）。
-            _manager = MCPClientManager(
-                command=[
-                    "uvx",
-                    "--with", "mcp>=1.28,<2",
-                    "--with", "pydantic>=2.13,<2.14",
-                    "amap-mcp-server",
-                ],
-                env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-                pool_size=4,
-            )
+            command, env = amap_runtime()
+            _manager = MCPClientManager(command, env, pool_size=settings.mcp_pool_size,
+                                       startup_timeout=settings.mcp_startup_timeout)
         return _manager
+
+
+def amap_manager_status():
+    """Reading status never starts a subprocess or downloads packages."""
+    if _manager is None:
+        return {"ready": False, "ready_sessions": 0, "pool_size": get_settings().mcp_pool_size}
+    return _manager.status()
 
 
 def shutdown_amap_manager() -> None:

@@ -275,14 +275,24 @@ def finalize_revision_node(state: PlanningState, config: RunnableConfig) -> dict
 
     intercity_cost = 0
     if plan.budget and request.travelers:
-        intercity_cost = round(plan.budget.intercity_transportation / request.travelers)
-    plan.budget = trip_quality_service.calculate_budget(
-        plan, request, intercity_cost_per_person=intercity_cost
-    )
+        intercity_cost = round(plan.budget.intercity_transportation / request.travelers
+                              / (2 if request.trip_type == "round_trip" else 1))
     plan.warnings.append(f"已根据修改要求更新：{state.get('revision_instruction', '')}")
     plan.planning_iterations = (plan.planning_iterations or 0) + 1
     # 重建时间轴：确定性的按新景点集合重排（受保护日的景点集合未变，仅时间轴重算）
-    itinerary_schedule_service.build(plan)
+    from ..services.road_route_service import RoadRouteResolver
+    changed_days = set(patch.affected_day_indexes)
+    original = state.get("plan")
+    if isinstance(original, TripPlan):
+        # Cross-day moves also invalidate their source day, even when omitted by the model.
+        for index, day in enumerate(plan.days):
+            if index >= len(original.days) or day.attractions != original.days[index].attractions:
+                changed_days.add(index)
+    itinerary_schedule_service.build(plan, route_resolver=RoadRouteResolver(plan.city, preference="自驾" if request.transportation == "自驾" else ""),
+                                     day_indexes=changed_days or None)
+    plan.budget = trip_quality_service.calculate_budget(
+        plan, request, intercity_cost_per_person=intercity_cost
+    )
 
     planner._report_progress(callback, 95, "optimizing", "预算与时间轴已重新计算")
     return {"result": plan}

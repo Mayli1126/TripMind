@@ -117,7 +117,7 @@ class AttractionImageService:
             return None
 
         # 根据优先级筛选有效结果
-        valid_results = [r for r in results if r is not None]
+        valid_results = [r for r in results if isinstance(r, dict)]
 
         for result in valid_results:
             # 优先选择精确匹配的结果
@@ -153,15 +153,19 @@ class AttractionImageService:
         if city:
             params["city"] = city
         try:
-            async with aiohttp.ClientSession() as session:
+            from ..infrastructure.provider_guard import provider_guard
+            async with provider_guard.async_slot('amap', self.amap_api_key) as permit, aiohttp.ClientSession() as session:
                 async with session.get(
                     "https://restapi.amap.com/v5/place/text",
                     params=params,
                     timeout=8,
                 ) as response:
                     if response.status != 200:
+                        if response.status == 429:
+                            await asyncio.to_thread(provider_guard.cooldown, permit, 10)
                         return None
                     data = await response.json()
+                    await asyncio.to_thread(provider_guard.inspect_map, permit, data)
         except Exception as exc:
             print(f"⚠️ 高德图片来源暂不可用: {exc}")
             return None

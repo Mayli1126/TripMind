@@ -23,6 +23,7 @@ from ...models.candidate import CandidatePlace
 from ...models.guide import GuideInput, GuideParseResult, GuideSourceRecord
 from ...services.candidate_pool_service import CandidatePool
 from ...services.guide_store_service import guide_store_service
+from ..auth import current_user
 
 router = APIRouter(prefix="/guide-sources", tags=["攻略解析"])
 
@@ -35,7 +36,7 @@ def _enforce_guide_quota(request: Request) -> None:
         return
     from ...infrastructure import redis_client
 
-    client_id = request.headers.get("X-Client-Id") or (
+    client_id = getattr(request.state, "user", {}).get("id") or (
         request.client.host if request.client else "anonymous"
     )
     allowed, _ = redis_client.quota_check_and_incr(
@@ -65,25 +66,28 @@ def _parse_and_save(record: GuideSourceRecord, source: GuideInput) -> GuideSourc
             error_message=f"攻略解析异常：{exc}",
             error_hint="请稍后重试，或改用粘贴正文方式导入",
         )
-    return guide_store_service.save_result(record.id, result) or record
+    try:
+        return guide_store_service.save_result(record.id, result) or record
+    except KeyError:
+        raise HTTPException(404, '攻略已删除，解析结果未重新保存') from None
 
 
 @router.post("", response_model=GuideSourceRecord, status_code=201)
 def create_guide_source(payload: GuideInput, raw_request: Request):
     """提交一篇攻略（正文/链接），同步解析并返回候选地点。"""
     _enforce_guide_quota(raw_request)
-    record = guide_store_service.create_record(payload)
+    record = guide_store_service.create_record(payload, owner_id=current_user(raw_request)["id"])
     return _parse_and_save(record, payload)
 
 
 @router.get("", response_model=list[GuideSourceRecord])
-def list_guide_sources():
+def list_guide_sources(request: Request):
     """最近导入的攻略列表（候选确认界面回显用）。"""
-    return guide_store_service.list_records()
+    return guide_store_service.list_records(owner_id=current_user(request)["id"])
 
 
 @router.get("/candidates", response_model=list[CandidatePlace])
-def aggregate_candidates(city: Optional[str] = None):
+def aggregate_candidates(request: Request, city: Optional[str] = None):
     """跨来源聚合候选池（候选云端化）。
 
     把所有解析成功攻略的候选经 CandidatePool 合并去重后返回；
@@ -91,7 +95,7 @@ def aggregate_candidates(city: Optional[str] = None):
     user_choice 覆盖服务端默认值。city 参数按候选城市过滤。
     """
     pool = CandidatePool()
-    for record in guide_store_service.list_records(limit=200):
+    for record in guide_store_service.list_records(limit=200, owner_id=current_user(request)["id"]):
         result = record.result
         if record.parse_status != "parsed" or result is None:
             continue

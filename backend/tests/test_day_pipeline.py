@@ -274,6 +274,21 @@ class PipelineFallbackTestCase(unittest.TestCase):
         self.assertIn("日编排管线生成", " ".join(plan.warnings))
 
 
+class SkeletonTokenBudgetTests(unittest.TestCase):
+    def test_direct_skeleton_keeps_model_budget_for_reasoning_models(self):
+        from app.config import get_settings
+        planner = mock.Mock()
+        planner.planner_agent.llm.max_tokens = 8192
+        planner.planner_agent.llm.invoke.return_value = '{}'
+        planner._needs_repair.return_value = False
+        with mock.patch.object(get_settings(), 'skeleton_direct_enabled', True), \
+             mock.patch.object(pg, '_get_planner', return_value=planner), \
+             mock.patch.object(pg, 'parse_skeleton', return_value=([], 'ok')), \
+             mock.patch.object(pg, 'materialize_skeleton', return_value=_simple_plan()):
+            pg.generate_plan_node({'request': _request(days=2), 'context': {}}, {'configurable': {}})
+        self.assertGreaterEqual(planner.planner_agent.llm.invoke.call_args.kwargs['max_tokens'], 8192)
+
+
 def _simple_plan() -> TripPlan:
     return TripPlan(
         city="北京", start_date="2026-12-01", end_date="2026-12-01", days=[],

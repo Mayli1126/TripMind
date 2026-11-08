@@ -27,7 +27,15 @@ class TripQualityService:
         intercity_cost_per_person: int = 0,
         transportation_option: TransportationOption | None = None,
         bind_meals: bool = True,
+        resolve_routes: bool = False,
     ) -> TripPlan:
+        from .price_reference_service import apply_price_references
+        apply_price_references(plan)
+        if resolve_routes:
+            from .price_reference_service import enrich_amap_costs
+            enrich_amap_costs(plan)
+            from .price_reference_service import enrich_llm_estimates
+            enrich_llm_estimates(plan, request)
         duplicate_warnings = self.remove_duplicate_attractions(plan)
         weather_warnings = self._apply_weather_rebalance(plan)
         plan.intercity_journey = self._build_intercity_journey(
@@ -52,7 +60,16 @@ class TripQualityService:
         # 交通方式差异化
         plan = transportation_mode_service.optimize_daily_transport(plan)
         
-        plan = itinerary_schedule_service.build(plan)
+        from .road_route_service import RoadRouteResolver
+        resolver = RoadRouteResolver(plan.city, preference="自驾" if request.transportation == "自驾" else "") if resolve_routes else None
+        plan = itinerary_schedule_service.build(plan, route_resolver=resolver)
+        if resolve_routes:
+            live_count = sum(item.route_leg is not None and not item.route_leg.is_estimated
+                             for day in plan.days for item in day.schedule)
+            plan.data_sources = [s for s in plan.data_sources if s.name != "市内逐段道路规划"]
+            plan.data_sources.append(DataSource(name="市内逐段道路规划", category="transportation",
+                source_type="live" if live_count else "estimated",
+                note=f"{live_count}段使用高德道路预期耗时，其余缺坐标或查询失败按估算；价格均为参考。地图连线及访问顺序仍为坐标示意，并非道路导航。"))
         warnings = list(dict.fromkeys([
             *plan.warnings, *duplicate_warnings, *weather_warnings,
             *transport_warnings, *capacity_warnings,
@@ -78,6 +95,8 @@ class TripQualityService:
             ))
 
         plan.warnings = list(dict.fromkeys(warnings))
+        from .attraction_advisory_service import enrich_advisories
+        plan.warnings = list(dict.fromkeys([*plan.warnings, *enrich_advisories(plan, request)]))
         plan.data_quality = "fallback" if plan.is_fallback else "mixed"
         return plan
 
@@ -418,11 +437,14 @@ class TripQualityService:
         request: TripRequest,
         intercity_cost_per_person: int = 0,
     ) -> Budget:
-        attraction_cost = sum(
-            attraction.ticket_price
+        from .price_reference_service import attraction_cost as price_for
+        from math import ceil
+        attraction_cost = ceil(sum(
+            price_for(attraction)
             for day in plan.days
-            for attraction in day.attractions
-        ) * request.travelers
+            for index, attraction in enumerate(day.attractions)
+            if not day.schedule or any(item.item_type == "attraction" and item.related_index == index for item in day.schedule)
+        ) * request.travelers)
 
         meal_cost = 0
         for day in plan.days:
@@ -437,11 +459,12 @@ class TripQualityService:
 
         # 入住晚数通常比旅行天数少 1。每天推荐的酒店只取对应入住夜晚。
         hotel_nights = max(request.travel_days - 1, 0)
-        hotel_cost = sum(
-            day.hotel.estimated_cost * request.rooms
+        hotel_cost = ceil(sum(
+            (day.hotel.amap_average_cost * request.travelers if day.hotel.amap_average_cost is not None
+             else day.hotel.estimated_cost * request.rooms)
             for day in plan.days[:hotel_nights]
             if day.hotel is not None
-        )
+        ))
 
         journey_count = 2 if request.trip_type == "round_trip" else 1
         intercity_cost = (
@@ -452,10 +475,30 @@ class TripQualityService:
             * request.travelers
             * request.travel_days
         )
+        routed = any(item.route_leg for day in plan.days for item in day.schedule)
+        if routed:
+            from math import ceil
+            segment_cost = 0.0
+            for day in plan.days:
+                if not any(item.route_leg for item in day.schedule):
+                    segment_cost += self.LOCAL_TRANSPORT_PER_PERSON_PER_DAY * request.travelers
+                    continue
+                for item in day.schedule:
+                    if item.route_leg:
+                        leg = item.route_leg
+                        units = ceil(request.travelers / 4) if leg.cost_unit == "vehicle" else request.travelers
+                        segment_cost += leg.cost * units
+                    elif item.item_type == "transport" and (
+                        item.title.startswith("前往 ") or item.title.startswith("抵达后")
+                    ) and item.duration_minutes > 0:
+                        # Unknown station/airport connector: separate, visible reserve, not a ticket.
+                        segment_cost += 15 * request.travelers
+            local_cost = ceil(segment_cost)
         transport_cost = intercity_cost + local_cost
         total = attraction_cost + meal_cost + hotel_cost + transport_cost
 
         return Budget(
+            unknown_ticket_count=sum(a.ticket_price is None and a.amap_average_cost is None for d in plan.days for a in d.attractions),
             total_attractions=attraction_cost,
             total_hotels=hotel_cost,
             total_meals=meal_cost,
@@ -468,8 +511,11 @@ class TripQualityService:
             over_budget=request.budget_limit is not None and total > request.budget_limit,
             calculation_note=(
                 f"按 {request.travelers} 人、{request.rooms} 间房计算；"
-                f"住宿按 {hotel_nights} 晚，市内交通按每人每天 "
-                f"¥{self.LOCAL_TRANSPORT_PER_PERSON_PER_DAY} 估算；跨城交通按"
+                f"住宿按 {hotel_nights} 晚；"
+                f"景点价格未知 {sum(a.ticket_price is None and a.amap_average_cost is None for d in plan.days for a in d.attractions)} 处未计入总额；总额不是完整报价；"
+                + ("市内按实际排程逐段汇总，公交按人数、驾车按每4人一车；未定位车站接驳按15元/人/段预留（机场实际费用可能远高于此），餐厅绕行未计；" if routed else
+                   f"市内交通按每人每天¥{self.LOCAL_TRANSPORT_PER_PERSON_PER_DAY}估算；")
+                + "景点/住宿优先按高德人均消费×人数计算，住宿另乘晚数；这不是门票或房价。缺失时使用已标注的静态参考/AI估价/房间预算；AI房费按间数乘晚数，未知部分未计入。AI价格依赖已有知识，未核验实时价格；餐饮及跨城票价也非实时报价。跨城交通按"
                 f"{'往返' if request.trip_type == 'round_trip' else '单程'}参考价计算。"
             ),
         )
@@ -603,6 +649,9 @@ class TripQualityService:
         这里在 finalize 收尾时用完整行程重写。
         """
         context = self._suggestions_context(plan, request)
+        from ..config import get_settings
+        if get_settings().planning_tips_mode == 'rules':
+            return self._rule_based_suggestions(plan, request)
         prompt = (
             "你是旅行顾问。根据下面这份已完成的行程，写 4~6 条出发前的实用贴士。\n"
             "要求：\n"

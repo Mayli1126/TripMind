@@ -93,11 +93,16 @@ class TripStoreService:
                 """
             )
 
+            connection.execute('BEGIN IMMEDIATE')
+            columns = {r['name'] for r in connection.execute('PRAGMA table_info(trip_progress)')}
+            if 'revision' not in columns:
+                connection.execute("ALTER TABLE trip_progress ADD COLUMN revision TEXT NOT NULL DEFAULT ''")
+
     @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat()
 
-    def create_trip(self, payload: SavedTripCreate) -> SavedTripDetail:
+    def create_trip(self, payload: SavedTripCreate, owner_id: str | None = None) -> SavedTripDetail:
         trip_id = uuid4().hex
         now = self._now()
         title = (payload.title or f"{payload.plan.city} · {payload.plan.start_date}").strip()
@@ -110,19 +115,25 @@ class TripStoreService:
                 "INSERT INTO trip_versions VALUES (?, 1, ?, ?, ?)",
                 (trip_id, payload.plan.model_dump_json(), "AI 生成初始行程", now),
             )
+            if owner_id:
+                connection.execute("INSERT INTO resource_owners VALUES ('trip', ?, ?, ?)",
+                                   (trip_id, owner_id, int(datetime.now(timezone.utc).timestamp())))
         return self.get_trip(trip_id)
 
-    def list_trips(self) -> list[SavedTripSummary]:
+    def list_trips(self, owner_id: str | None = None) -> list[SavedTripSummary]:
         with self._connection() as connection:
             rows = connection.execute(
                 """SELECT t.*, v.plan_json FROM trips t
                 JOIN trip_versions v ON v.trip_id=t.id AND v.version=t.current_version
-                ORDER BY t.updated_at DESC"""
+                """ + (" WHERE t.id IN (SELECT resource_id FROM resource_owners WHERE kind='trip' AND owner_id=?)" if owner_id else "")
+                + " ORDER BY t.updated_at DESC",
+                (owner_id,) if owner_id else (),
             ).fetchall()
         return [self._summary(row) for row in rows]
 
     def get_trip(self, trip_id: str) -> SavedTripDetail:
         with self._connection() as connection:
+            connection.execute('BEGIN')
             row = connection.execute(
                 """SELECT t.*, v.plan_json FROM trips t
                 JOIN trip_versions v ON v.trip_id=t.id AND v.version=t.current_version
@@ -150,6 +161,27 @@ class TripStoreService:
         import json
         request_data = json.loads(row["request_json"])
         request = TripRequest.model_construct(**request_data)
+        # Reconstruct nested historical candidates before deriving source-backed reminders.
+        from ..models.candidate import CandidatePlace
+        request.candidate_places = [CandidatePlace.model_validate(c) for c in request_data.get('candidate_places', [])]
+        from .attraction_advisory_service import enrich_advisories
+        plan.warnings = list(dict.fromkeys([*plan.warnings, *enrich_advisories(plan, request)]))
+        # Repair historical zero defaults in the read projection, without rewriting saved versions.
+        from .price_reference_service import apply_price_references
+        apply_price_references(plan)
+        if plan.budget:
+            old_total = plan.budget.total_attractions
+            from .price_reference_service import attraction_cost
+            from math import ceil
+            ticket_total = ceil(sum(attraction_cost(a) for d in plan.days for i, a in enumerate(d.attractions)
+                               if not d.schedule or any(s.item_type == 'attraction' and s.related_index == i for s in d.schedule)) * request.travelers)
+            plan.budget.total += ticket_total - old_total
+            plan.budget.total_attractions = ticket_total
+            plan.budget.per_person = round(plan.budget.total / request.travelers)
+            plan.budget.over_budget = request.budget_limit is not None and plan.budget.total > request.budget_limit
+            note = '景点/住宿优先高德人均消费参考；未知部分未计入，非门票或酒店实时报价。'
+            if note not in plan.budget.calculation_note:
+                plan.budget.calculation_note += note
         return SavedTripDetail.model_construct(
             **summary.model_dump(),
             request=request,
@@ -160,7 +192,8 @@ class TripStoreService:
     def add_version(self, trip_id: str, payload: SavedTripUpdate) -> SavedTripDetail:
         now = self._now()
         updated_plan = payload.plan.model_copy(deep=True)
-        with self._lock, self._connection() as connection:
+        # Read a base snapshot without holding the database write lock during map calls.
+        with self._connection() as connection:
             row = connection.execute(
                 """SELECT t.current_version, t.request_json, v.plan_json
                 FROM trips t JOIN trip_versions v
@@ -169,6 +202,8 @@ class TripStoreService:
             ).fetchone()
             if row is None:
                 raise KeyError(trip_id)
+            if payload.base_version is not None and payload.base_version != int(row["current_version"]):
+                raise ValueError("行程已更新，请基于最新版本重新生成修改建议")
             # 使用model_construct跳过验证，避免历史行程日期过期导致验证失败
             import json
             request_data = json.loads(row["request_json"])
@@ -185,8 +220,17 @@ class TripStoreService:
                 updated_plan,
                 request,
                 intercity_cost_per_person=intercity_per_person,
+                resolve_routes=True,
             )
-            version = int(row["current_version"]) + 1
+            base = int(row["current_version"])
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            latest = connection.execute("SELECT current_version FROM trips WHERE id=?", (trip_id,)).fetchone()
+            if latest is None:
+                raise KeyError(trip_id)
+            if int(latest['current_version']) != base:
+                raise ValueError("行程已更新，请刷新后基于最新版本重新修改")
+            version = base + 1
             connection.execute(
                 "INSERT INTO trip_versions VALUES (?, ?, ?, ?, ?)",
                 (trip_id, version, updated_plan.model_dump_json(), payload.change_note, now),
@@ -197,10 +241,10 @@ class TripStoreService:
             )
         return self.get_trip(trip_id)
 
-    def restore_version(self, trip_id: str, version: int) -> SavedTripDetail:
+    def restore_version(self, trip_id: str, version: int, base_version: int | None = None) -> SavedTripDetail:
         with self._connection() as connection:
             row = connection.execute(
-                "SELECT plan_json FROM trip_versions WHERE trip_id=? AND version=?",
+                "SELECT v.plan_json, t.current_version FROM trip_versions v JOIN trips t ON t.id=v.trip_id WHERE v.trip_id=? AND v.version=?",
                 (trip_id, version),
             ).fetchone()
         if row is None:
@@ -210,6 +254,7 @@ class TripStoreService:
             SavedTripUpdate(
                 plan=TripPlan.model_validate_json(row["plan_json"]),
                 change_note=f"恢复到版本 v{version}",
+                base_version=base_version if base_version is not None else row['current_version'],
             ),
         )
 
@@ -235,11 +280,12 @@ class TripStoreService:
 
     def get_progress(self, trip_id: str) -> TripProgressResponse:
         with self._connection() as connection:
+            connection.execute('BEGIN')
             exists = connection.execute("SELECT 1 FROM trips WHERE id=?", (trip_id,)).fetchone()
             if exists is None:
                 raise KeyError(trip_id)
             rows = connection.execute(
-                "SELECT item_key, completed, completed_at FROM trip_progress WHERE trip_id=? ORDER BY item_key",
+                "SELECT item_key, completed, completed_at, revision FROM trip_progress WHERE trip_id=? ORDER BY item_key",
                 (trip_id,),
             ).fetchall()
         return TripProgressResponse(
@@ -249,28 +295,36 @@ class TripStoreService:
                     item_key=row["item_key"],
                     completed=bool(row["completed"]),
                     completed_at=row["completed_at"],
+                    revision=row['revision'] or None,
                 )
                 for row in rows
             ],
         )
 
-    def set_progress(self, trip_id: str, item_key: str, completed: bool) -> TripProgressResponse:
+    def set_progress(self, trip_id: str, item_key: str, completed: bool,
+                     expected_revision: str | None = None, base_version: int | None = None) -> TripProgressResponse:
         if not item_key or len(item_key) > 200:
             raise ValueError("无效的计划步骤标识")
         now = self._now()
         completed_at = now if completed else None
         with self._lock, self._connection() as connection:
-            exists = connection.execute("SELECT 1 FROM trips WHERE id=?", (trip_id,)).fetchone()
+            connection.execute('BEGIN IMMEDIATE')
+            exists = connection.execute("SELECT current_version FROM trips WHERE id=?", (trip_id,)).fetchone()
             if exists is None:
                 raise KeyError(trip_id)
+            if base_version is not None:
+                old = connection.execute('SELECT revision FROM trip_progress WHERE trip_id=? AND item_key=?',
+                                         (trip_id, item_key)).fetchone()
+                if exists['current_version'] != base_version or ((old['revision'] or None) if old else None) != expected_revision:
+                    raise ValueError('完成状态或行程已更新，请刷新后重试')
             connection.execute(
-                """INSERT INTO trip_progress(trip_id, item_key, completed, completed_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                """INSERT INTO trip_progress(trip_id, item_key, completed, completed_at, updated_at, revision)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(trip_id, item_key) DO UPDATE SET
                     completed=excluded.completed,
                     completed_at=excluded.completed_at,
-                    updated_at=excluded.updated_at""",
-                (trip_id, item_key, int(completed), completed_at, now),
+                    updated_at=excluded.updated_at, revision=excluded.revision""",
+                (trip_id, item_key, int(completed), completed_at, now, uuid4().hex),
             )
         return self.get_progress(trip_id)
 

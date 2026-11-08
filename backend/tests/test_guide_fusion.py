@@ -435,6 +435,8 @@ class GuideStoreAndApiTestCase(TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.store = GuideStoreService(database_path=Path(self._tmp.name) / "test.db")
+        from app.services.auth_service import AuthService
+        AuthService(self.store.database_path).initialize()
         # 换成临时库，避免污染真实 tripmind.db
         self._patcher = mock.patch("app.api.routes.guide.guide_store_service", self.store)
         self._patcher.start()
@@ -442,6 +444,27 @@ class GuideStoreAndApiTestCase(TestCase):
     def tearDown(self):
         self._patcher.stop()
         self._tmp.cleanup()
+
+    def test_independent_writers_merge_candidate_choices(self):
+        from concurrent.futures import ThreadPoolExecutor
+        second = GuideStoreService(self.store.database_path)
+        record = self.store.create_record(GuideInput(input_type='text', content='参观故宫与公园'))
+        result = GuideParseResult(source_id=record.id, parse_status='parsed',
+                                 candidates=[_candidate('故宫'), _candidate('公园')])
+        self.store.save_result(record.id, result)
+        choices = [(self.store, {'tmp-故宫': 'required'}), (second, {'tmp-公园': 'excluded'})]
+        with ThreadPoolExecutor(2) as pool:
+            list(pool.map(lambda pair: pair[0].update_candidate_choices(record.id, pair[1]), choices))
+        saved = self.store.get_record(record.id)
+        self.assertEqual({c.canonical_name: c.user_choice for c in saved.result.candidates},
+                         {'故宫': 'required', '公园': 'excluded'})
+
+    def test_deleted_source_not_resurrected_by_late_parse(self):
+        record = self.store.create_record(GuideInput(input_type='text', content='参观故宫'))
+        self.store.delete_record(record.id)
+        with self.assertRaises(KeyError):
+            self.store.save_result(record.id, GuideParseResult(source_id=record.id, parse_status='parsed'))
+        self.assertIsNone(self.store.get_record(record.id))
 
     def test_store_roundtrip_and_facts(self):
         source = GuideInput(input_type="text", content="第一天去故宫，需预约", title="北京攻略", city="北京")
@@ -479,6 +502,7 @@ class GuideStoreAndApiTestCase(TestCase):
         )
         # 配额在 redis_enabled=false 时直接放行；用桩 Request 提供客户端标识
         stub_request = mock.Mock(headers={}, client=mock.Mock(host="127.0.0.1"))
+        stub_request.state.user = {'id': 'fixture-user', 'role': 'user'}
         with mock.patch("app.api.routes.guide.run_guide_fusion", return_value=(CandidatePool(), [parsed])):
             record = guide_routes.create_guide_source(source, stub_request)
         self.assertEqual(record.parse_status, "parsed")

@@ -18,6 +18,9 @@ from ...models.schemas import (
 from ...agents.trip_planner_agent import get_trip_planner_agent
 from ...config import get_settings
 from ...services.amap_service import get_amap_service
+from ...services.auth_service import auth_service
+from ..auth import current_user
+from ...services.runtime_service import require_planning_runtime
 
 
 def _enforce_quota(request: Request) -> None:
@@ -27,7 +30,7 @@ def _enforce_quota(request: Request) -> None:
         return
     from ...infrastructure import redis_client
 
-    client_id = request.headers.get("X-Client-Id") or (
+    client_id = getattr(request.state, "user", {}).get("id") or (
         request.client.host if request.client else "anonymous"
     )
     allowed, used = redis_client.quota_check_and_incr(
@@ -50,8 +53,16 @@ router = APIRouter(prefix="/trip", tags=["旅行规划"])
     summary="创建异步旅行规划任务",
 )
 async def create_planning_job(request: TripRequest, raw_request: Request):
-    _enforce_quota(raw_request)
-    return planning_job_service.create_plan(request)
+    from ...services.job_submission_service import submit_once
+    payload=request.model_dump(mode='json',exclude={'memory_context','conversation_context'})
+    def create(job_id):
+        require_planning_runtime(); _enforce_quota(raw_request)
+        from ...services.conversation_store import memory_context
+        from ...services.conversation_summary_service import summary_for
+        request.memory_context=memory_context(current_user(raw_request)['id'],request.city)
+        request.conversation_context=summary_for(current_user(raw_request)['id'],request.conversation_id,'planner')[0][:4200]
+        return planning_job_service.create_plan(request,job_id=job_id)
+    return await run_in_threadpool(submit_once,raw_request,'plan',payload,create)
 
 
 @router.post(
@@ -61,13 +72,16 @@ async def create_planning_job(request: TripRequest, raw_request: Request):
     summary="创建自然语言行程修改任务",
 )
 async def create_revision_job(request: TripRevisionRequest, raw_request: Request):
-    _enforce_quota(raw_request)
-    return planning_job_service.create_revision(
-        request.trip_request,
-        request.plan,
-        request.instruction,
-        base_version=request.base_version,
-    )
+    from ...services.job_submission_service import submit_once
+    payload=request.model_dump(mode='json')
+    payload['trip_request'].pop('memory_context',None); payload['trip_request'].pop('conversation_context',None)
+    def create(job_id):
+        require_planning_runtime(); _enforce_quota(raw_request)
+        from ...services.conversation_store import memory_context
+        request.trip_request.memory_context=memory_context(current_user(raw_request)['id'],request.trip_request.city)
+        return planning_job_service.create_revision(request.trip_request,request.plan,request.instruction,
+                                                   base_version=request.base_version,job_id=job_id)
+    return await run_in_threadpool(submit_once,raw_request,'revision',payload,create)
 
 
 @router.get(
@@ -80,6 +94,27 @@ async def get_planning_job(job_id: str):
         return planning_job_service.get(job_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="规划任务不存在或已过期") from exc
+    except Exception:
+        raise HTTPException(503,'暂时无法读取任务队列，请稍后重试') from None
+
+
+@router.post('/jobs/{job_id}/cancel',response_model=PlanningJobResponse)
+def cancel_planning_job(job_id: str):
+    try:
+        return planning_job_service.cancel(job_id)
+    except KeyError:
+        raise HTTPException(404,'任务不存在或已过期') from None
+
+
+@router.get('/jobs/{job_id}/diagnostics')
+def job_diagnostics(job_id: str):
+    try:
+        job=planning_job_service.get(job_id)
+    except KeyError:
+        raise HTTPException(404,'任务不存在或已过期') from None
+    return {'trace_id':job_id,'status':job.status,'stage':job.stage,'metrics':job.metrics,
+            'worker_id':job.worker_id,'run_id':job.run_id,'heartbeat_at':job.heartbeat_at,
+            'recovery_count':job.recovery_count,**job.diagnostics}
 
 
 @router.post(
@@ -89,6 +124,7 @@ async def get_planning_job(job_id: str):
 )
 async def resume_planning_job(job_id: str, body: JobResumeRequest):
     """对 waiting_input 状态的任务提交用户选择，Worker 从 Checkpointer 断点继续。"""
+    require_planning_runtime()
     settings = get_settings()
     if not settings.redis_enabled:
         raise HTTPException(status_code=400, detail="恢复功能需要 Redis 队列启用")
@@ -110,15 +146,9 @@ async def resume_planning_job(job_id: str, body: JobResumeRequest):
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="任务缺少原始请求，无法恢复") from exc
 
-    planning_job_service.mark_resumed(job_id)
-    redis_client.enqueue_job(
-        job_id,
-        "resume",
-        {
-            "request": stored_request.model_dump(mode="json"),
-            "resume_value": body.resume_value,
-        },
-    )
+    if body.resume_value not in {str(item.get('value')) for item in (current.waiting_input or {}).get('options',[])}:
+        raise HTTPException(422,'请选择当前确认卡片中的有效选项')
+    redis_client.resume_job(job_id,body.resume_value)
     return planning_job_service.get(job_id)
 
 
@@ -130,6 +160,7 @@ async def stream_planning_events(job_id: str, request: Request):
         raise HTTPException(status_code=404, detail="规划任务不存在或已过期") from exc
 
     async def event_generator():
+        last_snapshot_at = 0.0
         last_event_id = request.headers.get("last-event-id", "").strip()
         try:
             sequence = max(0, int(last_event_id) + 1) if last_event_id else 0
@@ -148,9 +179,15 @@ async def stream_planning_events(job_id: str, request: Request):
                 sequence = event["sequence"] + 1
                 payload = json.dumps(event, ensure_ascii=False)
                 yield f'id: {event["sequence"]}\nevent: progress\ndata: {payload}\n\n'
-            if current.status in {"completed", "failed"} and not events:
+            # Snapshots carry live timing without inventing progress or extending durable event history.
+            tick = asyncio.get_running_loop().time()
+            if tick - last_snapshot_at >= 5 or current.status in {"completed", "failed", "cancelled"}:
+                snapshot = current.model_dump(mode="json", exclude={"data"})
+                yield f'event: snapshot\ndata: {json.dumps(snapshot, ensure_ascii=False)}\n\n'
+                last_snapshot_at = tick
+            if current.status in {"completed", "failed", "cancelled"} and not events:
                 break
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.5)
 
     return StreamingResponse(
         event_generator(),
@@ -178,6 +215,7 @@ async def plan_trip(request: TripRequest):
     Returns:
         旅行计划响应
     """
+    require_planning_runtime()
     try:
         print(f"\n{'='*60}")
         print(f"📥 收到旅行规划请求:")

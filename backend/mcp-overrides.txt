@@ -1,0 +1,4 @@
+# amap-mcp-server declares an older SDK pin. Explicit overrides (not --with alone)
+# select the SDK used by this project's adapter. Keep in sync with mcp_runtime.py.
+mcp==1.28.1
+pydantic==2.13.4

@@ -17,16 +17,26 @@ import type {
   TransportationResponse,
   WaitingInputPayload
 } from '@/types'
+import type { PlannerChatMessage, PlannerChatResponse } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
-const apiClient = axios.create({
+export const apiClient = axios.create({
   baseURL: API_BASE_URL,
+  withCredentials: true,
   timeout: 300000, // 5分钟超时；规划进度本身通过SSE实时返回
   headers: {
     'Content-Type': 'application/json'
   }
 })
+
+export async function sendPlannerMessage(
+  messages: PlannerChatMessage[],
+  draft: PlannerChatResponse['draft'], conversationId?: string
+): Promise<PlannerChatResponse> {
+  const response = await apiClient.post<PlannerChatResponse>('/api/planner-chat/messages', { messages, draft, conversation_id: conversationId })
+  return response.data
+}
 
 // 请求拦截器
 apiClient.interceptors.request.use(
@@ -48,6 +58,14 @@ apiClient.interceptors.response.use(
   },
   (error) => {
     console.error('响应错误:', error.response?.status, error.message)
+    const requestId=error.response?.headers?.['x-request-id']
+    if(requestId && typeof error.response?.data?.detail==='string'){
+      error.response.data.detail+=`（请求编号 ${requestId}）`
+    }
+    if (typeof error.response?.data?.detail === 'string') error.message = error.response.data.detail
+    if (error.response?.status === 401 && !error.config?.url?.startsWith('/api/auth/')) {
+      window.dispatchEvent(new Event('tripmind:unauthorized'))
+    }
     return Promise.reject(error)
   }
 )
@@ -66,13 +84,33 @@ export async function generateTripPlan(formData: TripFormData): Promise<TripPlan
 }
 
 async function createPlanningJob(formData: TripFormData): Promise<PlanningJobResponse> {
-  const response = await apiClient.post<PlanningJobResponse>('/api/trip/jobs', formData)
-  return response.data
+  return submitTask('/api/trip/jobs',formData)
 }
 
 async function createRevisionJob(request: TripRevisionRequest): Promise<PlanningJobResponse> {
-  const response = await apiClient.post<PlanningJobResponse>('/api/trip/revision-jobs', request)
+  return submitTask('/api/trip/revision-jobs',request)
+}
+
+async function submitTask(url:string,payload:unknown):Promise<PlanningJobResponse> {
+  // Keep only a hash + random submission token in storage, not private request bodies.
+  const text=JSON.stringify(payload); let hash=2166136261, second=5381
+  for(let i=0;i<text.length;i++){hash=Math.imul(hash^text.charCodeAt(i),16777619);second=Math.imul(second,33)^text.charCodeAt(i)}
+  const storageKey=`tripmind.submit.${url}.${hash>>>0}.${second>>>0}.${text.length}`
+  let key=''
+  try {const saved=JSON.parse(sessionStorage.getItem(storageKey)||'null');if(saved&&Date.now()-saved.at<86400000)key=saved.key}catch{/* Storage is optional. */}
+  if(!key)key=Array.from(crypto.getRandomValues(new Uint8Array(16)),n=>n.toString(16).padStart(2,'0')).join('')
+  try{sessionStorage.setItem(storageKey,JSON.stringify({key,at:Date.now()}))}catch{/* Memory-only request still works. */}
+  const response=await apiClient.post<PlanningJobResponse>(url,payload,{headers:{'Idempotency-Key':key}})
+  try{sessionStorage.removeItem(storageKey)}catch{/* No private payload was stored. */}
   return response.data
+}
+
+export async function cancelPlanningJob(jobId:string):Promise<PlanningJobResponse> {
+  return (await apiClient.post(`/api/trip/jobs/${jobId}/cancel`)).data
+}
+
+export async function getJobDiagnostics(jobId:string) {
+  return (await apiClient.get(`/api/trip/jobs/${jobId}/diagnostics`)).data
 }
 
 // 查询任务状态（含 waiting_input 载荷）——恢复监听与决策卡片拉详情共用
@@ -89,15 +127,16 @@ export async function resumePlanningJob(jobId: string, resumeValue: string): Pro
   return response.data
 }
 
-function waitForPlanningJob(
+export function waitForPlanningJob(
   jobId: string,
   onProgress: (event: PlanningProgressEvent) => void,
-  onWaitingInput?: (jobId: string, payload: WaitingInputPayload) => void
+  onWaitingInput?: (jobId: string, payload: WaitingInputPayload) => void,
+  onSnapshot?: (job: PlanningJobResponse) => void
 ): Promise<TripPlan> & { cancel: () => void } {
   let settled = false
   let disconnectCount = 0
   let rejectFn: (reason: unknown) => void = () => {}
-  const events = new EventSource(`${API_BASE_URL}/api/trip/jobs/${jobId}/events`)
+  const events = new EventSource(`${API_BASE_URL}/api/trip/jobs/${jobId}/events`, { withCredentials: true })
 
   const promise = new Promise<TripPlan>((resolve, reject) => {
     rejectFn = reject
@@ -110,6 +149,8 @@ function waitForPlanningJob(
           settled = true
           events.close()
           resolve(job.data)
+        } else if (job.status === 'cancelled' || status === 'cancelled') {
+          settled=true;events.close();reject(Object.assign(new Error('任务已取消'),{name:'JobCancelled'}))
         } else if (status === 'failed') {
           settled = true
           events.close()
@@ -136,9 +177,18 @@ function waitForPlanningJob(
           .catch(() => {/* 详情拉取失败不打断监听，下次事件会再触发 */})
         return
       }
-      if (event.status === 'completed' || event.status === 'failed') {
+      if (event.status === 'completed' || event.status === 'failed' || event.status === 'cancelled') {
         void finish(event.status)
       }
+    })
+
+    events.addEventListener('snapshot', (rawEvent) => {
+      if (settled) return
+      disconnectCount = 0
+      const job = JSON.parse((rawEvent as MessageEvent).data) as PlanningJobResponse
+      onSnapshot?.(job)
+      if (job.waiting_input) onWaitingInput?.(jobId, job.waiting_input)
+      if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') void finish(job.status)
     })
 
     events.onerror = async () => {
@@ -150,6 +200,8 @@ function waitForPlanningJob(
           settled = true
           events.close()
           resolve(job.data)
+        } else if (job.status === 'cancelled') {
+          settled=true;events.close();reject(Object.assign(new Error('任务已取消'),{name:'JobCancelled'}))
         } else if (job.status === 'failed') {
           settled = true
           events.close()
@@ -157,7 +209,7 @@ function waitForPlanningJob(
         } else if (disconnectCount >= 3) {
           settled = true
           events.close()
-          reject(new Error('进度连接多次中断，请重新提交'))
+          reject(new Error('进度连接多次中断，任务可能仍在后台执行，请恢复连接查看状态。'))
         } else {
           // EventSource 会按服务端 retry 指令自动重连，并携带 Last-Event-ID 续传。
           return
@@ -187,23 +239,26 @@ function waitForPlanningJob(
 export function waitForExistingJob(
   jobId: string,
   onProgress: (event: PlanningProgressEvent) => void,
-  onWaitingInput?: (jobId: string, payload: WaitingInputPayload) => void
+  onWaitingInput?: (jobId: string, payload: WaitingInputPayload) => void,
+  onSnapshot?: (job: PlanningJobResponse) => void
 ): Promise<TripPlan> & { cancel: () => void } {
-  return waitForPlanningJob(jobId, onProgress, onWaitingInput)
+  return waitForPlanningJob(jobId, onProgress, onWaitingInput, onSnapshot)
 }
 
 export function generateTripPlanWithProgress(
   formData: TripFormData,
   onProgress: (event: PlanningProgressEvent) => void,
   onWaitingInput?: (jobId: string, payload: WaitingInputPayload) => void,
-  onJobCreated?: (jobId: string) => void
+  onJobCreated?: (jobId: string) => void,
+  onSnapshot?: (job: PlanningJobResponse) => void
 ): Promise<TripPlan> & { cancel: () => void } {
   // 任务 ID 创建后才建立 SSE 监听；cancel 需穿透到最终连接
   let cancelInner: (() => void) | null = null
   const promise = createPlanningJob(formData)
     .then((job) => {
       onJobCreated?.(job.job_id)  // 供前端记录 active_job，页面刷新后可恢复监听
-      const waiter = waitForPlanningJob(job.job_id, onProgress, onWaitingInput)
+      onSnapshot?.(job)
+      const waiter = waitForPlanningJob(job.job_id, onProgress, onWaitingInput, onSnapshot)
       cancelInner = waiter.cancel
       return waiter
     })
@@ -215,11 +270,13 @@ export function generateTripPlanWithProgress(
 export function reviseTripWithProgress(
   request: TripRevisionRequest,
   onProgress: (event: PlanningProgressEvent) => void,
-  onWaitingInput?: (jobId: string, payload: WaitingInputPayload) => void
+  onWaitingInput?: (jobId: string, payload: WaitingInputPayload) => void,
+  onJobCreated?: (jobId:string) => void
 ): Promise<TripPlan> & { cancel: () => void } {
   let cancelInner: (() => void) | null = null
   const promise = createRevisionJob(request)
     .then((job) => {
+      onJobCreated?.(job.job_id)
       const waiter = waitForPlanningJob(job.job_id, onProgress, onWaitingInput)
       cancelInner = waiter.cancel
       return waiter
@@ -244,21 +301,45 @@ export async function getSavedTrip(tripId: string): Promise<SavedTripDetail> {
   return response.data
 }
 
+export async function refreshTripAdvisories(tripId: string): Promise<{ trip: SavedTripDetail; checked: number; partial: number; skipped: number }> {
+  return (await apiClient.post(`/api/library/trips/${tripId}/refresh-advisories`)).data
+}
+
 export async function saveTripVersion(
   tripId: string,
   plan: TripPlan,
-  changeNote: string
+  changeNote: string,
+  baseVersion: number
 ): Promise<SavedTripDetail> {
   const response = await apiClient.post<SavedTripDetail>(`/api/library/trips/${tripId}/versions`, {
     plan,
-    change_note: changeNote
+    change_note: changeNote,
+    base_version: baseVersion
   })
   return response.data
 }
 
-export async function restoreTripVersion(tripId: string, version: number): Promise<SavedTripDetail> {
-  const response = await apiClient.post<SavedTripDetail>(`/api/library/trips/${tripId}/versions/${version}/restore`)
+export async function restoreTripVersion(tripId: string, version: number, baseVersion: number): Promise<SavedTripDetail> {
+  const response = await apiClient.post<SavedTripDetail>(`/api/library/trips/${tripId}/versions/${version}/restore`, null, { params: { base_version: baseVersion } })
   return response.data
+}
+
+export interface TripAssistantAnswer {
+  conversation_summary?: import('./conversations').ConversationSummary | null
+  answer: string
+  evidence: { path: string; value: string }[]
+  uncertainties: string[]
+  proposed_instruction: string | null
+  can_apply: boolean
+  base_version: number
+}
+
+export async function askSavedTrip(tripId: string, baseVersion: number, messages: PlannerChatMessage[], conversationId?: string): Promise<TripAssistantAnswer> {
+  return (await apiClient.post(`/api/library/trips/${tripId}/assistant/messages`, { base_version: baseVersion, messages, conversation_id: conversationId })).data
+}
+
+export async function createAssistantRevision(tripId: string, baseVersion: number, instruction: string): Promise<PlanningJobResponse> {
+  return submitTask(`/api/library/trips/${tripId}/assistant/revision-jobs`, { base_version: baseVersion, instruction })
 }
 
 export async function deleteSavedTrip(tripId: string): Promise<void> {
@@ -283,11 +364,13 @@ export async function getTripProgress(tripId: string): Promise<TripProgressRespo
 export async function updateTripProgress(
   tripId: string,
   itemKey: string,
-  completed: boolean
+  completed: boolean,
+  baseVersion: number,
+  expectedRevision: string | null
 ): Promise<TripProgressResponse> {
   const response = await apiClient.put<TripProgressResponse>(
     `/api/library/trips/${tripId}/progress/${encodeURIComponent(itemKey)}`,
-    { completed }
+    { completed, base_version: baseVersion, expected_revision: expectedRevision }
   )
   return response.data
 }

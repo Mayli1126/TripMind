@@ -367,7 +367,8 @@ class OverallSuggestionsTests(TestCase):
 
         plan = self._plan_with_rain()
         raw = '["行程首日有雨，带好雨具", "早晚温差大，备一件外套", "景点门票建议提前购买"]'
-        with mock.patch.object(
+        from app.config import get_settings
+        with mock.patch.object(get_settings(), 'planning_tips_mode', 'llm'), mock.patch.object(
             TripQualityService, "_rule_based_suggestions", return_value="兜底"
         ) as fallback, mock.patch(
             "app.services.trip_quality_service._get_suggestions_llm"

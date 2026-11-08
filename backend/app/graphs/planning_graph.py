@@ -280,7 +280,9 @@ def _planner_query_with_candidates(
         context.get("transportation", ""),
     )
     # 必去/想去候选的硬约束与已核对坐标只通过 prompt 传递；excluded 已在上游过滤
-    return query + render_candidates_for_prompt(getattr(request, "candidate_places", []) or [])
+    memory = getattr(request, 'memory_context', '')
+    return query + render_candidates_for_prompt(getattr(request, "candidate_places", []) or []) + (
+        '\n长期偏好参考（仅软偏好，本轮需求与系统硬约束优先）：\n' + memory if memory else '')
 
 
 def generate_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
@@ -293,7 +295,7 @@ def generate_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
     planner._report_progress(callback, 72, "research_joined", "并行资料已汇合，准备生成行程")
     if getattr(request, "candidate_places", None):
         planner._report_progress(
-            callback, 74, "planning", f"将优先安排你确认的 {len(request.candidate_places)} 个攻略候选地点"
+            callback, 74, "candidate_alignment", f"将优先安排你确认的 {len(request.candidate_places)} 个攻略候选地点"
         )
     # 批2 日编排管线优先：容量(确定性) -> 骨架(LLM 只出名称) -> 物化(候选/高德回填)。
     # 失败自动回退单次大 JSON 旧路径（含既有桩测试环境），行为兼容。
@@ -307,8 +309,19 @@ def generate_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
             context.get("attractions", ""),
             context.get("hotels", ""),
         )
-        planner._report_progress(callback, 78, "planning", "Planner 正在编排每日行程骨架")
-        skeleton_raw = planner._run_agent_fresh(planner.planner_agent, skeleton_prompt)
+        planner._report_progress(callback, 78, "skeleton_generation", "正在根据时间和偏好编排行程骨架")
+        from ..config import get_settings
+        if get_settings().skeleton_direct_enabled and hasattr(planner.planner_agent, 'llm'):
+            # The skeleton needs no tools or full-plan agent/system prompt.
+            # Per-request kwargs avoid changing a shared client's token limit concurrently.
+            # Reasoning models share this budget with hidden reasoning; keep the configured floor.
+            skeleton_raw = planner.planner_agent.llm.invoke([
+                {'role': 'system', 'content': '只返回紧凑的行程骨架JSON，不输出推理过程、不调用工具。'},
+                {'role': 'user', 'content': skeleton_prompt},
+            ], max_tokens=max(planner.planner_agent.llm.max_tokens,
+                              min(16384, max(2048, request.travel_days * 450 + 512))))
+        else:
+            skeleton_raw = planner._run_agent_fresh(planner.planner_agent, skeleton_prompt)
         # 若后续结构校验仍需修复，至少把原始骨架交给修复器，不能传空字符串。
         planner_response = skeleton_raw
         skeletons, overall = parse_skeleton(skeleton_raw, capacities)
@@ -317,7 +330,7 @@ def generate_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
         planner._report_progress(callback, 86, "validating", "正在校验计划结构与可执行性")
     except DayPipelineError as exc:
         print(f"⚠️ 日编排管线回退单次生成：{exc}")
-        planner._report_progress(callback, 78, "planning", "正在按整份方式编排行程")
+        planner._report_progress(callback, 78, "fallback_generation", "骨架需要调整，正在重新生成完整行程")
         trip_plan = None
 
     if trip_plan is None:
@@ -329,7 +342,7 @@ def generate_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
     replan_count = 0
     if planner._needs_repair(trip_plan, request):
         print("🔁 Validator发现结构性问题，执行一次受限重规划...")
-        planner._report_progress(callback, 89, "replanning", "发现结构问题，正在自动修复")
+        planner._report_progress(callback, 89, "repair_generation", "发现结构问题，正在自动修复")
         repaired_plan = planner._repair_plan(request, planner_response)
         replan_count = 1
         if (
@@ -559,14 +572,17 @@ def finalize_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
     trip_plan = _as_plan(state["plan"])
     request = _as_request(state["request"])
 
+    planner._report_progress(callback, 93, "optimizing", "正在核对时间轴、路线和预算")
     trip_plan = trip_quality_service.finalize(
         trip_plan,
         request,
         intercity_cost_per_person=state.get("intercity_cost_per_person", 0),
         transportation_option=_as_transportation_option(state.get("transportation_option")),
+        resolve_routes=True,
     )
     # 总体建议：收尾时基于完整行程（含预算/天气/交通约束）重写为多条实用贴士；
     # 失败保留骨架阶段的两三句话原文，绝不影响主流程出结果
+    planner._report_progress(callback, 96, "tips", "正在根据完整行程整理出行建议")
     try:
         trip_plan.overall_suggestions = trip_quality_service.refine_overall_suggestions(
             trip_plan, request
@@ -578,7 +594,7 @@ def finalize_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
             callback, 97, "degraded", "生成结果不完整，已切换为参考计划并标注原因"
         )
     else:
-        planner._report_progress(callback, 97, "optimizing", "预算复核与路线优化完成")
+        planner._report_progress(callback, 97, "finalized", "行程与出行建议已整理完成")
 
     return {"result": trip_plan}
 
@@ -644,12 +660,16 @@ def run_planning_graph(
     progress_callback: ProgressCallback = None,
     job_id: str = "",
     resume_value: Any = None,
+    recover: bool = False,
+    expected_question: Any = None,
 ) -> TripPlan:
     """以同步方式执行规划图；异常时退回 fallback 计划（与旧行为一致）。
 
     resume_value 不为 None 时，恢复 job_id 对应断点继续执行（interrupt 之后）。
     图触发 interrupt 时抛出 PlanningWaitingInput（由 Worker 落 waiting_input 状态）。
     """
+    if progress_callback:
+        progress_callback(3, "initializing", "正在准备地图工具与规划服务")
     planner = _get_planner()
     planner._report_progress(progress_callback, 5, "initializing", "正在理解旅行需求与约束")
     degraded_warnings: list[str] = []
@@ -660,8 +680,23 @@ def run_planning_graph(
                 "thread_id": job_id or "adhoc",
             }
         }
-        if resume_value is not None and job_id:
+        graph=get_planning_graph()
+        checkpoint=graph.get_state(config) if recover and job_id and graph.checkpointer else None
+        if checkpoint and checkpoint.values and not checkpoint.next and checkpoint.values.get('result'):
+            return _as_plan(checkpoint.values['result'])
+        interrupted=bool(checkpoint and any(getattr(task,'interrupts',()) for task in checkpoint.tasks))
+        if interrupted and resume_value is not None and expected_question:
+            questions=[getattr(interrupt,'value',None) for task in checkpoint.tasks for interrupt in getattr(task,'interrupts',())]
+            if expected_question not in questions:
+                resume_value=None  # The old choice already advanced to a different confirmation.
+        if checkpoint and checkpoint.next and not interrupted:
+            from ..infrastructure.task_trace import emit
+            emit('runtime','checkpoint','resumed',reason='pending_nodes')
+            payload=None
+        elif resume_value is not None and job_id:
             payload: Any = Command(resume=resume_value)
+        elif checkpoint and checkpoint.next:
+            payload=None  # Recover the persisted interrupt; do not restart research.
         else:
             payload = PlanningState(
                 mode="plan",
@@ -673,7 +708,7 @@ def run_planning_graph(
         # RedisSaver 只实现了同步方法，aget_tuple 走基类默认直接抛
         # NotImplementedError（Windows 复现过：Redis 模式下所有规划任务失败）。
         # 本图节点全部为同步函数，sync invoke + sync checkpointer 是该版本唯一可用组合。
-        final_state = get_planning_graph().invoke(payload, config=config)
+        final_state = graph.invoke(payload, config=config)
         interrupts = final_state.get("__interrupt__") if isinstance(final_state, dict) else None
         if interrupts:
             first = interrupts[0]

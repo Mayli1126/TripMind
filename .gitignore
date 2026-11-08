@@ -25,6 +25,8 @@ backend/data/
 
 # 内部方案与交接文档（不对外公开，含其下的工作日志）
 docs/
+# 本地部署交接副本（含个人环境与工作记录）
+backend/DEPLOYMENT.md
 
 # 内部 CI 配置（不随仓库公开）
 .github/

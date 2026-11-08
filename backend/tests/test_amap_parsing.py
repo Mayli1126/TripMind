@@ -24,6 +24,8 @@ def make_service(payload) -> AmapService:
 
 class AmapPayloadTests(TestCase):
     def setUp(self):
+        guard = patch('app.infrastructure.provider_guard.map_http', side_effect=lambda operation, *args: operation())
+        guard.start(); self.addCleanup(guard.stop)
         with amap_module._POI_CACHE_LOCK:
             amap_module._POI_MEMORY_CACHE.clear()
             amap_module._POI_INFLIGHT.clear()
@@ -100,7 +102,7 @@ class AmapPayloadTests(TestCase):
         service = object.__new__(AmapService)
         service._prefer_direct_poi_search = True
 
-        settings = SimpleNamespace(redis_enabled=False, amap_api_key="test-key")
+        settings = SimpleNamespace(cache_enabled=False, redis_enabled=False, amap_api_key="test-key")
         with patch.object(amap_module, "get_settings", return_value=settings), patch.object(
             amap_module, "_wait_for_amap_poi_slot"
         ), patch.object(
@@ -133,7 +135,7 @@ class AmapPayloadTests(TestCase):
         service = object.__new__(AmapService)
         service._prefer_direct_poi_search = True
 
-        settings = SimpleNamespace(redis_enabled=False, amap_api_key="test-key")
+        settings = SimpleNamespace(cache_enabled=False, redis_enabled=False, amap_api_key="test-key")
         with patch.object(amap_module, "get_settings", return_value=settings), patch.object(
             amap_module, "_wait_for_amap_poi_slot"
         ), patch.object(
@@ -158,7 +160,7 @@ class AmapPayloadTests(TestCase):
         }
         service = object.__new__(AmapService)
         service._prefer_direct_poi_search = True
-        settings = SimpleNamespace(redis_enabled=False, amap_api_key="test-key")
+        settings = SimpleNamespace(cache_enabled=False, redis_enabled=False, amap_api_key="test-key")
 
         with patch.object(amap_module, "get_settings", return_value=settings), patch.object(
             amap_module, "_wait_for_amap_poi_slot"

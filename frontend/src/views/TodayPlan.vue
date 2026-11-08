@@ -69,6 +69,12 @@
         </aside>
 
         <div class="plan-board">
+          <section aria-label="出发前核实清单">
+            <button :disabled="refreshing" @click="refreshChecks">{{ refreshing ? '正在刷新…' : '↻ 核实开放时间与预约信息' }}</button><p v-if="refreshStatus">{{ refreshStatus }}</p>
+            <template v-for="place in currentDay.attractions" :key="place.poi_id || place.name">
+              <div v-if="place.advisory"><strong>{{ place.name }} · 出发前检查</strong><AttractionAdvisory :advisory="place.advisory" /></div>
+            </template>
+          </section>
           <div class="board-heading">
             <div><span>DAILY CHECKLIST</span><h2>今日计划表</h2></div>
             <b>{{ completedCount }} / {{ currentSteps.length }}</b>
@@ -115,7 +121,8 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Spin as ASpin, message } from 'ant-design-vue'
-import { getSavedTrip, getTripProgress, updateTripProgress } from '@/services/api'
+import { getSavedTrip, getTripProgress, updateTripProgress, refreshTripAdvisories } from '@/services/api'
+import AttractionAdvisory from '@/components/AttractionAdvisory.vue'
 import type { DayPlan, SavedTripDetail } from '@/types'
 
 interface ExecutionStep {
@@ -135,8 +142,17 @@ const route = useRoute()
 const router = useRouter()
 const tripId = String(route.params.id || '')
 const trip = ref<SavedTripDetail | null>(null)
+const refreshing = ref(false), refreshStatus = ref('')
+async function refreshChecks() {
+  if (!trip.value || refreshing.value) return
+  refreshing.value = true
+  try { const result = await refreshTripAdvisories(tripId); trip.value = result.trip; refreshStatus.value = result.partial ? '部分来源未能核实，旧信息已保留，请查看提醒。' : '信息已更新。' }
+  catch { refreshStatus.value = '刷新失败，已有信息仍保留。' }
+  finally { refreshing.value = false }
+}
 const selectedDay = ref(0)
 const progress = ref<Record<string, boolean>>({})
+const progressRevisions = ref<Record<string, string | null>>({})
 const savingKey = ref('')
 
 onMounted(async () => {
@@ -144,6 +160,7 @@ onMounted(async () => {
     const [saved, savedProgress] = await Promise.all([getSavedTrip(tripId), getTripProgress(tripId)])
     trip.value = saved
     progress.value = Object.fromEntries(savedProgress.items.map(item => [item.item_key, item.completed]))
+    progressRevisions.value = Object.fromEntries(savedProgress.items.map(item => [item.item_key, item.revision || null]))
     const today = localDate()
     const exactDay = saved.plan.days.findIndex(day => day.date === today)
     const nextDay = saved.plan.days.findIndex(day => day.date > today)
@@ -290,11 +307,13 @@ const toggleStep = async (step: ExecutionStep) => {
   progress.value = { ...progress.value, [step.key]: !previous }
   savingKey.value = step.key
   try {
-    const result = await updateTripProgress(tripId, step.key, !previous)
+    if (!trip.value) return
+    const result = await updateTripProgress(tripId, step.key, !previous, trip.value.current_version, progressRevisions.value[step.key] || null)
     progress.value = Object.fromEntries(result.items.map(item => [item.item_key, item.completed]))
+    progressRevisions.value = Object.fromEntries(result.items.map(item => [item.item_key, item.revision || null]))
   } catch (error: any) {
     progress.value = { ...progress.value, [step.key]: previous }
-    message.error(error.message || '完成状态保存失败')
+    message.error(error.response?.data?.detail || error.message || '完成状态保存失败')
   } finally {
     savingKey.value = ''
   }

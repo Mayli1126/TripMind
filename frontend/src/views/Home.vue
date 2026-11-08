@@ -541,9 +541,11 @@ watch(() => formData.city, () => {
   void refreshCandidateCount()
 })
 
+const preferenceRevision = ref(0)
 onMounted(async () => {
   try {
     const preferences = await getUserPreferences()
+    preferenceRevision.value = preferences.revision || 0
     Object.assign(formData, preferences)
   } catch {
     // 首次使用或后端尚未启动时继续使用安全默认值。
@@ -602,7 +604,8 @@ const finalizePlan = async (plan: TripPlan, requestData: TripFormData) => {
   loadingStatus.value = '旅行计划已经准备完成'
   const savedTrip = await createSavedTrip(requestData, plan)
   try {
-    await saveUserPreferences({
+    const preferences = await saveUserPreferences({
+      revision: preferenceRevision.value,
       origin_city: requestData.origin_city,
       transportation: requestData.transportation,
       accommodation: requestData.accommodation,
@@ -613,6 +616,7 @@ const finalizePlan = async (plan: TripPlan, requestData: TripFormData) => {
       optimization_goal: requestData.optimization_goal,
       pace: requestData.pace
     })
+    preferenceRevision.value = preferences.revision || 0
   } catch {
     // 偏好保存是辅助能力，不应阻止用户查看已经生成并保存的行程。
   }

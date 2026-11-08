@@ -13,6 +13,8 @@
         >{{ tab.label }}</button>
       </div>
       <div class="nav-actions">
+        <button v-if="savedTrip" class="nav-ghost" :disabled="editMode || revisionLoading || !!pendingRevision || refreshingAdvisories" @click="refreshAdvisories">{{ refreshingAdvisories ? '正在核实…' : '↻ 核实开放与预约' }}</button>
+        <button class="nav-ghost assistant-nav" :disabled="assistantUnavailable" @click="openTripAssistant()">{{ assistantOpening ? '正在保存…' : savedTrip ? '✦ 行程对话' : '✦ 保存并对话' }}</button>
         <button v-if="savedTrip" class="nav-ghost" :disabled="!tripPlan" title="旅行计划表" @click="router.push(`/trips/${savedTrip.id}/today`)">📋</button>
         <button v-if="savedTrip" class="nav-ghost" :disabled="!tripPlan" title="历史版本" @click="historyOpen = true">↶ <i>{{ savedTrip.versions.length }}</i></button>
         <button class="nav-ghost" :disabled="!tripPlan" @click="openRevisionDrawer">✦ AI 修改</button>
@@ -59,7 +61,7 @@
         <section id="overview" class="overview-section">
           <div class="overview-head">
             <div class="overview-title">
-              <h1>{{ tripPlan.city }} {{ tripPlan.days.length }} 日行程</h1>
+              <h1><span class="destination-name">{{ tripPlan.city }}</span><span class="trip-length">{{ tripPlan.days.length }}日行程</span></h1>
               <p class="overview-date">{{ tripPlan.start_date }} <i>至</i> {{ tripPlan.end_date }}<template v-if="totalAttractions"> · 共安排 {{ totalAttractions }} 个地点</template></p>
             </div>
             <div class="overview-stats">
@@ -89,6 +91,17 @@
             @select="onCoverSelect"
           />
 
+          <div class="assistant-entry">
+            <div class="assistant-entry-copy">
+              <div><h3>行程对话</h3><p>询问安排，或用一句话调整行程。</p></div>
+            </div>
+            <div class="assistant-quick-questions">
+              <button v-for="question in assistantQuestions" :key="question" :disabled="assistantUnavailable" @click="openTripAssistant(question)">{{ question }} ↗</button>
+              <button class="assistant-entry-action" :disabled="assistantUnavailable" @click="openTripAssistant()">{{ assistantOpening ? '正在保存行程…' : savedTrip ? '打开行程对话 →' : '保存行程并开始对话 →' }}</button>
+            </div>
+            <small v-if="editMode || pendingRevision">请先保存或放弃当前修改，再打开对话。</small>
+          </div>
+
           <div v-if="overallTips.length" class="overview-tips">
             <h4>出发前须知</h4>
             <ol class="tips-list">
@@ -109,37 +122,9 @@
           </div>
         </section>
 
-        <!-- 景点地图：这趟怎么走，一眼看懂 -->
-        <section id="map" class="map-block">
-          <div class="map-section">
-            <div id="amap-container" style="width: 100%; height: 100%"></div>
-            <div class="map-legend" v-if="selectedDay === -1 && tripPlan.days.length > 1">
-              <span v-for="(_day, index) in tripPlan.days" :key="index" class="legend-item">
-                <i :style="{ background: DAY_COLORS[index % DAY_COLORS.length] }"></i>第{{ index + 1 }}天
-              </span>
-            </div>
-          </div>
-        </section>
 
         <!-- 每日行程 -->
         <section id="days" class="days-block">
-        <div class="day-tabs">
-          <button
-            class="day-tab"
-            :class="{ active: selectedDay === -1 }"
-            @click="selectDay(-1)"
-          >全程总览</button>
-          <button
-            v-for="(day, index) in tripPlan.days"
-            :key="index"
-            class="day-tab"
-            :class="{ active: selectedDay === index }"
-            @click="selectDay(index)"
-          >
-            <b>第{{ index + 1 }}天</b>
-            <small v-if="day.theme">{{ day.theme }}</small>
-          </button>
-        </div>
 
         <!-- 每日行程：按选中日期展示 -->
         <a-card v-if="tripPlan.intercity_journey" class="intercity-card" :bordered="false">
@@ -177,6 +162,8 @@
           </div>
         </a-card>
 
+        <div class="itinerary-workspace">
+        <div class="itinerary-list">
         <section
           v-for="day in visibleDays"
           :key="day.day_index"
@@ -184,7 +171,14 @@
           class="day-section"
         >
           <div class="day-header">
-            <div><span class="day-title" :style="{ background: DAY_COLORS[day.day_index % DAY_COLORS.length] }">第{{ day.day_index + 1 }}天</span><b v-if="day.theme">{{ day.theme }}</b></div>
+            <div>
+              <div class="day-stepper" role="group" aria-label="切换行程日期">
+                <button aria-label="前一天" :disabled="selectedDay <= 0" @click="selectDay(selectedDay - 1)">‹</button>
+                <span aria-live="polite">第{{ selectedDay + 1 }}天</span>
+                <button aria-label="后一天" :disabled="selectedDay >= tripPlan.days.length - 1" @click="selectDay(selectedDay + 1)">›</button>
+              </div>
+              <b :title="day.theme || ''">当天路线</b>
+            </div>
             <span class="day-date">{{ day.date }}</span>
           </div>
           <div v-if="weatherOfDay(day.date)" class="weather-strip" :class="{ [`wx-${weatherOfDay(day.date)!.tone}`]: true }">
@@ -195,187 +189,103 @@
           </div>
           <div v-else class="weather-strip none"><span class="wx-now">🌡️ 当天暂无天气预报</span></div>
 
-              <!-- 行程基本信息 -->
-              <div class="day-info">
-                <div class="info-row">
-                  <span class="label">📝 行程描述:</span>
-                  <span class="value">{{ day.description }}</span>
-                </div>
-                <div class="info-row">
-                  <span class="label">🚗 交通方式:</span>
-                  <span class="value">{{ day.transportation }}</span>
-                </div>
-                <div class="info-row">
-                  <span class="label">🏨 住宿:</span>
-                  <span class="value">{{ day.accommodation }}</span>
-                </div>
-                <div v-if="day.route_summary" class="info-row">
-                  <span class="label">🧭 路线优化:</span>
-                  <span class="value">
-                    约 {{ day.route_summary.distance_after_km }} km / {{ day.route_summary.estimated_travel_minutes }} 分钟
-                    <a-tag v-if="day.route_summary.saved_percent > 0" color="green">
-                      减少 {{ day.route_summary.saved_percent }}%
-                    </a-tag>
-                    <small v-if="day.route_summary.start_anchor" class="route-anchor-note">
-                      从 {{ day.route_summary.start_anchor }} 出发，首段约 {{ day.route_summary.start_transfer_km }} km
-                      <template v-if="day.route_summary.end_anchor">
-                        · 最后一站至 {{ day.route_summary.end_anchor }} 约 {{ day.route_summary.end_transfer_km }} km
-                      </template>
-                    </small>
-                  </span>
-                </div>
+              <div :key="`${day.day_index}-${selectedDay}`" class="stop-list">
+                <button v-for="(item, index) in day.attractions" :key="`${day.day_index}-${index}-${item.name}`"
+                  class="stop-row" :class="{ selected: selectedStop?.item === item }"
+                  :aria-pressed="selectedStop?.item === item" :data-attraction-name="item.name"
+                  @click="selectStop(item)" @mouseenter="highlightMarker(item.name, true)" @mouseleave="highlightMarker(item.name, false)">
+                  <span class="stop-number">{{ String(index + 1).padStart(2, '0') }}</span>
+                  <span class="stop-thumbnail"><img :src="getAttractionImage(item.name, index)" :alt="item.name" loading="lazy" @error="handleImageError" /></span>
+                  <span class="stop-name">{{ item.name }}</span><span class="stop-arrow" aria-hidden="true">›</span>
+                </button>
+                <p v-if="!day.attractions.length" class="stop-empty">这一天暂时没有景点安排。</p>
+                <button v-if="day.hotel" class="hotel-row" :class="{ selected: selectedHotel === day.hotel }"
+                  :aria-pressed="selectedHotel === day.hotel" @click="selectHotel(day.hotel, day.day_index)"
+                  @mouseenter="highlightMarker(`hotel:${day.day_index}`, true)" @mouseleave="highlightMarker(`hotel:${day.day_index}`, false)">
+                  <span class="hotel-symbol" aria-hidden="true">住</span>
+                  <span class="hotel-row-copy"><small>当天住宿</small><strong>{{ day.hotel.name || '酒店待选择' }}</strong>
+                    <span>{{ day.hotel.address || day.hotel.type || day.accommodation || '具体位置待确认' }}</span></span>
+                  <span class="stop-arrow" aria-hidden="true">›</span>
+                </button>
               </div>
 
-              <a-divider v-if="displaySchedule(day.schedule).length" orientation="left">🧭 交通与用餐参考</a-divider>
-              <div v-if="displaySchedule(day.schedule).length" class="daily-timeline">
-                <div v-for="(slot, slotIndex) in displaySchedule(day.schedule)" :key="`${slot.start_time}-${slotIndex}`" class="timeline-slot" :class="`slot-${slot.item_type}`">
-                  <div class="slot-time"><b>{{ scheduleTimeLabel(slot.start_time, slot.start_day_offset) }}</b><span>{{ scheduleTimeLabel(slot.end_time, slot.end_day_offset) }}</span></div>
-                  <div class="slot-marker">{{ getScheduleIcon(slot.item_type) }}</div>
-                  <div class="slot-content">
-                    <div><h4>{{ slot.title }}</h4><a-tag>{{ slot.duration_minutes }} 分钟</a-tag></div>
-                    <p v-if="slot.description">{{ slot.description }}</p>
-                    <small v-if="slot.address">⌖ {{ slot.address }}</small>
-                    <em v-if="slot.notes">{{ slot.notes }}</em>
-                  </div>
-                </div>
-              </div>
-
-              <!-- 景点安排 -->
-              <a-divider orientation="left">🎯 景点安排</a-divider>
-              <a-list
-                :data-source="day.attractions"
-                :grid="{ gutter: 16, column: 2 }"
-              >
-                <template #renderItem="{ item, index }">
-                  <a-list-item>
-                    <a-card :title="item.name" size="small" class="attraction-card">
-                      <!-- 编辑模式下的操作按钮 -->
-                      <template #extra v-if="editMode">
-                        <a-space>
-                          <a-button
-                            size="small"
-                            @click="moveAttraction(day.day_index, index, 'up')"
-                            :disabled="index === 0"
-                          >
-                            ↑
-                          </a-button>
-                          <a-button
-                            size="small"
-                            @click="moveAttraction(day.day_index, index, 'down')"
-                            :disabled="index === day.attractions.length - 1"
-                          >
-                            ↓
-                          </a-button>
-                          <a-button
-                            size="small"
-                            danger
-                            @click="deleteAttraction(day.day_index, index)"
-                          >
-                            🗑️
-                          </a-button>
-                        </a-space>
-                      </template>
-
-                      <!-- 景点图片 -->
-                      <div
-                        class="attraction-image-wrapper"
-                        :data-attraction-name="item.name"
-                        @mouseenter="highlightMarker(item.name, true)"
-                        @mouseleave="highlightMarker(item.name, false)"
-                      >
-                        <img
-                          :src="getAttractionImage(item.name, index)"
-                          :alt="item.name"
-                          class="attraction-image"
-                          @error="handleImageError"
-                        />
-                        <div class="attraction-badge">
-                          <span class="badge-number">{{ index + 1 }}</span>
-                        </div>
-                        <div v-if="item.ticket_price" class="price-tag">
-                          ¥{{ item.ticket_price }}
-                        </div>
-                        <a
-                          v-if="attractionPhotoMeta[item.name]?.source"
-                          class="photo-source"
-                          :href="attractionPhotoMeta[item.name].sourceUrl || undefined"
-                          target="_blank"
-                          rel="noreferrer"
-                          :title="attractionPhotoMeta[item.name].attribution"
-                        >
-                          图片 · {{ attractionPhotoMeta[item.name].source }}
-                        </a>
-                      </div>
-
-                      <!-- 编辑模式下可编辑的字段 -->
-                      <div v-if="editMode">
-                        <p><strong>地址:</strong></p>
-                        <a-input v-model:value="item.address" size="small" style="margin-bottom: 8px" />
-
-                        <p><strong>游览时长(分钟):</strong></p>
-                        <a-input-number v-model:value="item.visit_duration" :min="10" :max="480" size="small" style="width: 100%; margin-bottom: 8px" />
-
-                        <p><strong>描述:</strong></p>
-                        <a-textarea v-model:value="item.description" :rows="2" size="small" style="margin-bottom: 8px" />
-                      </div>
-
-                      <!-- 查看模式：一眼看懂关键信息 -->
-                      <div v-else class="attraction-info">
-                        <div class="info-badges">
-                          <span class="info-badge">⏱ 建议 {{ item.visit_duration }} 分钟</span>
-                          <span v-if="item.ticket_price" class="info-badge price">门票 ¥{{ item.ticket_price }}</span>
-                          <span v-else class="info-badge free">免费</span>
-                          <span v-if="item.opening_time" class="info-badge">{{ item.opening_time }}<template v-if="item.closing_time"> - {{ item.closing_time }}</template></span>
-                          <span v-if="item.rating" class="info-badge rating">★ {{ item.rating }}</span>
-                        </div>
-                        <p v-if="item.description" class="info-desc">{{ item.description }}</p>
-                        <p v-if="item.address" class="info-addr">📍 {{ item.address }}</p>
-                      </div>
-                    </a-card>
-                  </a-list-item>
-                </template>
-              </a-list>
-
-              <!-- 酒店推荐 -->
-              <a-divider v-if="day.hotel" orientation="left">🏨 住宿推荐</a-divider>
-              <a-card v-if="day.hotel" size="small" class="hotel-card">
-                <template #title>
-                  <span class="hotel-title">{{ day.hotel.name }}</span>
-                </template>
-                <a-descriptions :column="2" size="small">
-                  <a-descriptions-item label="地址">{{ day.hotel.address }}</a-descriptions-item>
-                  <a-descriptions-item label="类型">{{ day.hotel.type }}</a-descriptions-item>
-                  <a-descriptions-item label="价格范围">{{ day.hotel.price_range }}</a-descriptions-item>
-                  <a-descriptions-item label="评分">{{ day.hotel.rating }}⭐</a-descriptions-item>
-                  <a-descriptions-item label="距离" :span="2">{{ day.hotel.distance }}</a-descriptions-item>
-                </a-descriptions>
-              </a-card>
-
-              <!-- 餐饮安排 -->
-              <a-divider orientation="left">🍽️ 餐饮安排</a-divider>
-              <a-descriptions :column="1" bordered size="small">
-                <a-descriptions-item
-                  v-for="meal in day.meals"
-                  :key="meal.type"
-                  :label="getMealLabel(meal.type)"
-                >
-                  {{ meal.name }}
-                  <span v-if="meal.description"> - {{ meal.description }}</span>
-                </a-descriptions-item>
-              </a-descriptions>
         </section>
+        </div>
+        <aside class="itinerary-inspector">
+            <section id="map" class="explorer-map">
+              <div class="explorer-panel-heading"><h3>路线地图</h3><span class="explorer-live-dot">{{ selectedDay === -1 ? '全程路线' : `第${selectedDay + 1}天路线` }}</span></div>
+              <div class="map-section">
+                <div id="amap-container" style="width: 100%; height: 100%"></div>
+                <div v-if="mapLoading" class="map-status">正在铺开你的旅行地图…</div>
+                <div v-else-if="mapFailed" class="map-status"><strong>地图暂时未能加载</strong><span>景点与行程仍可正常查看</span><button @click="initMap">重新加载</button></div>
+                <div v-if="selectedDay === -1 && tripPlan.days.length > 1" class="map-legend">
+                  <span v-for="(_day, index) in tripPlan.days" :key="index" class="legend-item"><i :style="{ background: DAY_COLORS[index % DAY_COLORS.length] }"></i>第{{ index + 1 }}天</span>
+                </div>
+              </div>
+            </section>
+          <section class="stop-detail" aria-label="地点详细信息" aria-live="polite">
+            <div v-if="selectedHotel" class="detail-content hotel-detail">
+              <p class="hotel-detail-label">当天住宿参考</p>
+              <StayReference :hotel="selectedHotel" compact />
+              <p v-if="!validHotelLocation(selectedHotel)" class="hotel-location-note">酒店暂无有效坐标，暂未在地图标注；预订前请核实具体地址。</p>
+            </div>
+            <div v-else-if="selectedStop" :key="`${selectedStop.day.day_index}-${selectedStop.index}-${selectedStop.item.name}`" class="detail-content">
+              <div class="detail-place-heading">
+              <div class="detail-place-title">
+                <p>第{{ selectedStop.day.day_index + 1 }}天 / 第{{ selectedStop.index + 1 }}站</p>
+                <h2>{{ selectedStop.item.name }}</h2>
+              </div>
+              <div class="detail-photo attraction-image-wrapper" :data-attraction-name="selectedStop.item.name">
+                <img :src="getAttractionImage(selectedStop.item.name, selectedStop.index)" :alt="selectedStop.item.name" @error="handleImageError" />
+                <a v-if="attractionPhotoMeta[selectedStop.item.name]?.source" class="photo-source"
+                  :href="attractionPhotoMeta[selectedStop.item.name].sourceUrl || undefined"
+                  target="_blank" rel="noreferrer" :title="attractionPhotoMeta[selectedStop.item.name].attribution">图片 · {{ attractionPhotoMeta[selectedStop.item.name].source }}</a>
+              </div>
+              </div>
+              <div v-if="editMode" class="detail-editor">
+                <div class="detail-edit-actions">
+                  <a-button size="small" :disabled="selectedStop.index === 0" @click="moveAttraction(selectedStop.day.day_index, selectedStop.index, 'up')">↑ 上移</a-button>
+                  <a-button size="small" :disabled="selectedStop.index === selectedStop.day.attractions.length - 1" @click="moveAttraction(selectedStop.day.day_index, selectedStop.index, 'down')">↓ 下移</a-button>
+                  <a-button size="small" danger @click="deleteAttraction(selectedStop.day.day_index, selectedStop.index)">删除景点</a-button>
+                </div>
+                <label>景点地址<a-input v-model:value="selectedStop.item.address" /></label>
+                <label>游览时长（分钟）<a-input-number v-model:value="selectedStop.item.visit_duration" :min="10" :max="480" /></label>
+                <label>景点介绍<a-textarea v-model:value="selectedStop.item.description" :rows="3" /></label>
+              </div>
+              <div v-else class="detail-copy">
+                <div class="info-badges">
+                  <span class="info-badge">建议 {{ selectedStop.item.visit_duration }} 分钟</span>
+                  <span v-if="selectedStop.item.amap_average_cost != null" class="info-badge price">高德人均参考 ¥{{ selectedStop.item.amap_average_cost }}/人 · 非门票报价</span>
+                  <span v-else-if="selectedStop.item.ticket_price_source === 'llm_estimate'" class="info-badge price" :title="selectedStop.item.ticket_price_note">AI门票估价 ¥{{ selectedStop.item.ticket_price }}/人 · 未核验</span>
+                  <span v-else class="info-badge price" :title="selectedStop.item.ticket_price_note">{{ selectedStop.item.ticket_price == null || (selectedStop.item.ticket_price === 0 && !selectedStop.item.ticket_price_source) ? '门票待核实' : selectedStop.item.ticket_price === 0 ? '免费参考 · 以官方为准' : `门票参考 ¥${selectedStop.item.ticket_price}/人 · 非实时` }}</span>
+                  <span v-if="selectedStop.item.rating" class="info-badge rating">★ {{ selectedStop.item.rating }}</span>
+                </div>
+                <p v-if="selectedStop.item.description" class="detail-description">{{ selectedStop.item.description }}</p>
+                <div class="detail-facts">
+                  <div v-if="selectedStop.item.opening_time"><span>开放参考</span><strong>{{ selectedStop.item.opening_time }}<template v-if="selectedStop.item.closing_time"> — {{ selectedStop.item.closing_time }}</template></strong></div>
+                  <div v-if="selectedStop.item.address"><span>景点地址</span><strong>{{ selectedStop.item.address }}</strong></div>
+                </div>
+                <AttractionAdvisory :advisory="selectedStop.item.advisory" />
+              </div>
+            </div>
+            <div v-else class="detail-empty"><span>⌖</span><h3>下一站，想去哪里？</h3><p>点击左侧景点，在这里查看详细信息。</p></div>
+          </section>
+        </aside>
+        </div>
         </section>
 
         <!-- 费用明细：旅程安排看完后的核对区 -->
         <a-card v-if="tripPlan.budget" id="budget" class="budget-detail-card" :bordered="false">
-          <template #title>💰 费用明细</template>
+          <template #title>费用与出行安排</template>
+          <template v-if="tripPlan.budget">
           <div class="budget-grid">
             <div class="budget-item">
-              <div class="budget-label">景点门票</div>
-              <div class="budget-value">¥{{ tripPlan.budget.total_attractions }}</div>
+              <div class="budget-label">景点消费参考 · 优先高德人均</div>
+              <div class="budget-value">{{ tripPlan.budget.unknown_ticket_count && !tripPlan.budget.total_attractions ? '待核实' : `¥${tripPlan.budget.total_attractions}` }}</div>
+              <small v-if="tripPlan.budget.unknown_ticket_count">另有 {{ tripPlan.budget.unknown_ticket_count }} 处价格未知，未计入</small>
             </div>
             <div class="budget-item">
-              <div class="budget-label">酒店住宿</div>
+              <div class="budget-label">住宿消费参考 · 非酒店报价</div>
               <div class="budget-value">¥{{ tripPlan.budget.total_hotels }}</div>
             </div>
             <div class="budget-item">
@@ -400,40 +310,9 @@
             <span class="total-value">¥{{ tripPlan.budget.total }}</span>
           </div>
           <p class="budget-note">{{ tripPlan.budget.calculation_note }}</p>
+          </template>
         </a-card>
 
-        <!-- 天气信息 -->
-        <a-card id="weather" v-if="tripPlan.weather_info && tripPlan.weather_info.length > 0" title="天气信息" style="margin-top: 20px" :bordered="false">
-        <a-list
-          :data-source="tripPlan.weather_info"
-          :grid="{ gutter: 16, column: 3 }"
-        >
-          <template #renderItem="{ item }">
-            <a-list-item>
-              <a-card size="small" class="weather-card">
-                <div class="weather-date">{{ item.date }}</div>
-                <div class="weather-info-row">
-                  <span class="weather-icon">☀️</span>
-                  <div>
-                    <div class="weather-label">白天</div>
-                    <div class="weather-value">{{ item.day_weather }} {{ item.day_temp }}°C</div>
-                  </div>
-                </div>
-                <div class="weather-info-row">
-                  <span class="weather-icon">🌙</span>
-                  <div>
-                    <div class="weather-label">夜间</div>
-                    <div class="weather-value">{{ item.night_weather }} {{ item.night_temp }}°C</div>
-                  </div>
-                </div>
-                <div class="weather-wind">
-                  💨 {{ item.wind_direction }} {{ item.wind_power }}
-                </div>
-              </a-card>
-            </a-list-item>
-          </template>
-        </a-list>
-        </a-card>
       </div>
     </div>
 
@@ -446,6 +325,10 @@
       </template>
       <a-button type="primary" @click="goBack">返回首页创建行程</a-button>
     </a-empty>
+
+    <a-drawer :open="assistantOpen" title="行程对话" width="min(520px, 100vw)" :destroy-on-close="true" :body-style="{ padding: 0, overflow: 'hidden' }" @close="closeTripAssistant">
+      <TripAssistant v-if="savedTrip && assistantOpen" ref="assistantPanel" embedded :trip-id="savedTrip.id" :initial-question="assistantQuestion" @updated="applyAssistantUpdate" />
+    </a-drawer>
 
     <a-drawer
       v-model:open="revisionOpen"
@@ -484,6 +367,7 @@
           <span>{{ revisionStatus }}</span><b>{{ revisionProgress }}%</b>
         </div>
         <a-progress :percent="revisionProgress" :show-info="false" />
+        <TaskDiagnostics :job-id="revisionJobId" />
         <div class="revision-events">
           <span v-for="event in revisionEvents" :key="event.sequence">
             <i>{{ getRevisionStageIcon(event.stage) }}</i>{{ event.message }}
@@ -561,6 +445,7 @@
 </template>
 
 <script setup lang="ts">
+import TaskDiagnostics from '@/components/TaskDiagnostics.vue'
 import { computed, ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -568,18 +453,12 @@ import {
   BackTop as ABackTop,
   Button as AButton,
   Card as ACard,
-  Descriptions as ADescriptions,
-  DescriptionsItem as ADescriptionsItem,
-  Divider as ADivider,
   Drawer as ADrawer,
   Dropdown as ADropdown,
   Empty as AEmpty,
   Input as AInput,
   InputNumber as AInputNumber,
-  List as AList,
-  ListItem as AListItem,
   Progress as AProgress,
-  Space as ASpace,
   Tag as ATag,
   Textarea as ATextarea,
   Timeline as ATimeline,
@@ -587,10 +466,13 @@ import {
   message
 } from 'ant-design-vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
-import { getSavedTrip, restoreTripVersion, reviseTripWithProgress, saveTripVersion } from '@/services/api'
-import type { PlanningProgressEvent, RevisionChange, SavedTripDetail, ScheduleItem, TripFormData, TripPlan } from '@/types'
+import { createSavedTrip, getSavedTrip, restoreTripVersion, reviseTripWithProgress, saveTripVersion, refreshTripAdvisories } from '@/services/api'
+import type { Attraction, Hotel, PlanningProgressEvent, RevisionChange, SavedTripDetail, TripFormData, TripPlan } from '@/types'
 import RevisionDiff from '@/components/RevisionDiff.vue'
+import AttractionAdvisory from '@/components/AttractionAdvisory.vue'
 import CoverflowGallery from '@/components/CoverflowGallery.vue'
+import TripAssistant from './TripAssistant.vue'
+import StayReference from '@/components/StayReference.vue'
 import type { CoverflowItem } from '@/components/CoverflowGallery.vue'
 
 const router = useRouter()
@@ -602,15 +484,33 @@ const attractionPhotos = ref<Record<string, string>>({})
 const attractionPhotoMeta = ref<Record<string, { source: string; sourceUrl?: string; attribution?: string }>>({})
 const tripRequest = ref<TripFormData | null>(null)
 const revisionOpen = ref(false)
+const assistantOpen = ref(false)
+const assistantQuestion = ref('')
+const assistantPanel = ref<InstanceType<typeof TripAssistant>>()
 const revisionInstruction = ref('')
 const revisionLoading = ref(false)
+const revisionJobId=ref('')
 const revisionProgress = ref(0)
 const revisionStatus = ref('')
 const revisionEvents = ref<PlanningProgressEvent[]>([])
 const revisionHistory = ref<string[]>([])
-const pendingRevision = ref<{ plan: TripPlan; instruction: string; explanation: string } | null>(null)
+const pendingRevision = ref<{ plan: TripPlan; instruction: string; explanation: string; baseVersion?: number } | null>(null)
 const diffOpen = ref(false)
 const savedTrip = ref<SavedTripDetail | null>(null)
+const refreshingAdvisories = ref(false)
+async function refreshAdvisories() {
+  if (!savedTrip.value || refreshingAdvisories.value) return
+  refreshingAdvisories.value = true
+  try {
+    const result = await refreshTripAdvisories(savedTrip.value.id)
+    savedTrip.value = result.trip; tripPlan.value = result.trip.plan
+    message.info(result.partial ? `已处理 ${result.checked} 个地点，部分信息仍待核实，请查看卡片提示。` : `已更新 ${result.checked} 个地点的信息。`)
+  } catch (error: any) { message.error(error.response?.data?.detail || '刷新失败，原计划仍保留') }
+  finally { refreshingAdvisories.value = false }
+}
+const assistantOpening = ref(false)
+const assistantUnavailable = computed(() => !tripPlan.value || editMode.value || revisionLoading.value || !!pendingRevision.value || assistantOpening.value || restoringVersion.value !== null)
+const assistantQuestions = ['这份安排来得及吗？', '预算是怎么算的？', '想把行程安排轻松一点']
 const historyOpen = ref(false)
 const restoringVersion = ref<number | null>(null)
 const quickRevisionPrompts = [
@@ -620,8 +520,10 @@ const quickRevisionPrompts = [
   '把餐饮换成当地特色小吃'
 ]
 let map: any = null
+const mapLoading = ref(false)
+const mapFailed = ref(false)
 // 日期聚焦：-1 = 全程总览（多日不同颜色路线），>=0 聚焦某一天（只画当日路线）
-const selectedDay = ref(-1)
+const selectedDay = ref(0)
 // 每天的专属颜色（地图路线、标记、日期标题共用，编号一一对应）
 const DAY_COLORS = ['#ff6b4a', '#4776e6', '#21a179', '#9b59b6', '#d4a017', '#00a8a8', '#e67e22', '#7f8c8d']
 const visibleDays = computed(() =>
@@ -631,11 +533,58 @@ const visibleDays = computed(() =>
         ? [tripPlan.value.days[selectedDay.value]]
         : (tripPlan.value?.days || []))
 )
+const selectedAttraction = ref<Attraction | null>(null)
+const hotelSelection = ref<Hotel | null>(null)
+const selectedHotel = computed(() => visibleDays.value.find(day => day.hotel === hotelSelection.value)?.hotel || null)
+const validHotelLocation = (hotel: Hotel) => {
+  const location = hotel.location
+  return !!location && Number.isFinite(location.longitude) && Number.isFinite(location.latitude)
+    && Math.abs(location.longitude) <= 180 && Math.abs(location.latitude) <= 90
+    && (location.longitude !== 0 || location.latitude !== 0)
+}
+const selectHotel = (hotel: Hotel, dayIndex: number) => {
+  if (selectedStop.value) highlightMarker(selectedStop.value.item.name, false)
+  hotelSelection.value = hotel
+  if (map && validHotelLocation(hotel)) {
+    map.setZoomAndCenter(14, [hotel.location!.longitude, hotel.location!.latitude])
+    highlightMarker(`hotel:${dayIndex}`, true)
+  }
+  if (window.matchMedia('(max-width: 760px)').matches) {
+    nextTick(() => document.querySelector('.stop-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+  }
+}
+const visibleStops = computed(() => visibleDays.value.flatMap(day =>
+  day.attractions.map((item, index) => ({ day, item, index }))
+))
+const selectedStop = computed(() =>
+  selectedHotel.value ? null : visibleStops.value.find(stop => stop.item === selectedAttraction.value) || visibleStops.value[0] || null
+)
+const selectStop = (item: Attraction) => {
+  visibleDays.value.forEach(day => highlightMarker(`hotel:${day.day_index}`, false))
+  hotelSelection.value = null
+  if (selectedStop.value) highlightMarker(selectedStop.value.item.name, false)
+  selectedAttraction.value = item
+  if (map && item.location?.longitude && item.location?.latitude) {
+    map.setZoomAndCenter(14, [item.location.longitude, item.location.latitude])
+    highlightMarker(item.name, true)
+  }
+  nextTick(observePendingImages)
+  if (window.matchMedia('(max-width: 760px)').matches) {
+    nextTick(() => document.querySelector('.stop-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+  }
+}
+// Reordering, deleting, switching days and restoring a version keep the inspector in sync.
+watch(() => visibleStops.value.map(stop => `${stop.day.day_index}:${stop.item.name}:${stop.item.location?.longitude}:${stop.item.location?.latitude}`).join('|'), () => {
+  if (map) nextTick(redrawRoutes)
+})
+watch(() => visibleDays.value.map(day => `${day.day_index}:${day.hotel?.name}:${day.hotel?.location?.longitude}:${day.hotel?.location?.latitude}`).join('|'), () => {
+  if (map) nextTick(redrawRoutes)
+})
 // 行程被修改/恢复后天数可能变化：聚焦日越界时自动回到全程总览，避免渲染崩溃
 watch(
   () => tripPlan.value?.days.length,
   (len) => {
-    if (len !== undefined && selectedDay.value >= len) selectedDay.value = -1
+    if (len !== undefined && selectedDay.value >= len) selectedDay.value = 0
   }
 )
 const totalAttractions = computed(
@@ -654,11 +603,13 @@ const weatherRange = computed(() => {
 })
 // 切换日期：重绘地图路线并滚动到行程区顶部
 const selectDay = (index: number) => {
+  if (!tripPlan.value || index < 0 || index >= tripPlan.value.days.length) return
   selectedDay.value = index
+  hotelSelection.value = null
+  selectedAttraction.value = null
   nextTick(() => {
-    redrawRoutes()
     observePendingImages()
-    document.querySelector('.day-tabs')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    document.querySelector('.day-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   })
 }
 
@@ -668,9 +619,8 @@ const selectDay = (index: number) => {
 // 有对应数据的分区才出现在导航里（无天气/无预算的行程不显示对应 Tab）
 const navTabs = computed<{ id: string; label: string }[]>(() => {
   const tabs = [{ id: 'overview', label: '行程概览' }]
-  if (tripPlan.value?.budget) tabs.push({ id: 'budget', label: '预算明细' })
+  if (tripPlan.value?.budget) tabs.push({ id: 'budget', label: '费用与安排' })
   tabs.push({ id: 'map', label: '景点地图' }, { id: 'days', label: '每日行程' })
-  if (tripPlan.value?.weather_info?.length) tabs.push({ id: 'weather', label: '天气信息' })
   return tabs
 })
 const activeSection = ref('overview')
@@ -721,6 +671,7 @@ const onCoverSelect = (index: number) => {
   if (!target) return
   scrollToSection('days')
   selectDay(target.dayIndex)
+  nextTick(() => focusAttractionCard(target.name))
 }
 
 // 出发前贴士：后端 overall_suggestions 为换行分隔的多条文本
@@ -783,7 +734,7 @@ onMounted(async () => {
 const refreshPlanVisuals = async () => {
   await nextTick()
   // 地图优先加载，不再等待图片
-  if (map) map.destroy()
+  if (map) { map.destroy(); map = null }
   initMap()
   // 图片异步加载，不阻塞地图
   loadAttractionPhotos()
@@ -806,6 +757,40 @@ const goBack = () => {
   router.push('/')
 }
 
+const openTripAssistant = async (question = '') => {
+  if (assistantUnavailable.value || !tripPlan.value) return
+  assistantOpening.value = true
+  try {
+    if (!savedTrip.value) {
+      if (!tripRequest.value) {
+        message.warning('这份临时计划缺少原始需求，暂时不能保存并打开对话，请重新生成行程。')
+        return
+      }
+      savedTrip.value = await createSavedTrip(tripRequest.value, tripPlan.value)
+      tripPlan.value = savedTrip.value.plan
+    }
+    assistantQuestion.value = question
+    assistantOpen.value = true
+  } catch (error: any) {
+    message.error(error.response?.data?.detail || '暂时无法打开行程对话，请稍后重试')
+  } finally {
+    assistantOpening.value = false
+  }
+}
+
+const closeTripAssistant = () => {
+  if (assistantPanel.value && !assistantPanel.value.canClose()) return
+  assistantOpen.value = false
+}
+const applyAssistantUpdate = async (trip: SavedTripDetail) => {
+  savedTrip.value = trip
+  tripPlan.value = trip.plan
+  tripRequest.value = trip.request
+  sessionStorage.setItem('tripPlan', JSON.stringify(trip.plan))
+  sessionStorage.setItem('tripRequest', JSON.stringify(trip.request))
+  await refreshPlanVisuals()
+}
+
 const openRevisionDrawer = () => {
   if (!tripRequest.value) {
     message.warning('当前行程缺少原始约束，请从首页重新生成后再使用 AI 修改')
@@ -815,8 +800,9 @@ const openRevisionDrawer = () => {
 }
 
 const submitRevision = async () => {
-  if (!tripPlan.value || !tripRequest.value || revisionInstruction.value.trim().length < 2) return
+  if (revisionLoading.value || !tripPlan.value || !tripRequest.value || revisionInstruction.value.trim().length < 2) return
   const instruction = revisionInstruction.value.trim()
+  const baseVersion = savedTrip.value?.current_version
   revisionLoading.value = true
   revisionProgress.value = 0
   revisionStatus.value = '正在创建修改任务...'
@@ -827,7 +813,7 @@ const submitRevision = async () => {
       plan: tripPlan.value,
       instruction,
       // 乐观锁：基于行程库当前版本修改，版本不一致时后端拒绝（防并发覆盖）
-      base_version: savedTrip.value?.current_version
+      base_version: baseVersion
     }, (event) => {
       revisionProgress.value = event.progress
       revisionStatus.value = event.message
@@ -835,10 +821,11 @@ const submitRevision = async () => {
       if (!previous || previous.stage !== event.stage || previous.message !== event.message) {
         revisionEvents.value.push(event)
       }
-    })
+      }, undefined, id=>{revisionJobId.value=id})
     // 阶段1批1：先展示差异确认，用户确认后才应用
     const diff = (revisedPlan.revision_diff || []) as RevisionChange[]
     pendingRevision.value = {
+      baseVersion,
       plan: revisedPlan,
       instruction,
       explanation: diff.length ? `AI 理解的修改：${instruction}` : `修改范围较大：${instruction}`,
@@ -846,7 +833,8 @@ const submitRevision = async () => {
     revisionOpen.value = false
     diffOpen.value = true
   } catch (error: any) {
-    message.error(error.message || '修改失败，当前计划未发生变化')
+      if(error?.name==='JobCancelled')message.info('修改已取消，当前计划未发生变化')
+      else message.error(error.message || '修改失败，当前计划未发生变化')
   } finally {
     revisionLoading.value = false
   }
@@ -859,7 +847,8 @@ const confirmRevision = async () => {
   try {
     // 先落版本再切本地状态：保存失败时保持差异弹窗打开，用户可重试，不产生本地/服务端不一致
     if (savedTrip.value) {
-      savedTrip.value = await saveTripVersion(savedTrip.value.id, revisedPlan, `AI 修改：${pending.instruction}`)
+      if (!pending.baseVersion) throw new Error('缺少修改基础版本，请重新生成修改建议')
+      savedTrip.value = await saveTripVersion(savedTrip.value.id, revisedPlan, `AI 修改：${pending.instruction}`, pending.baseVersion)
       tripPlan.value = savedTrip.value.plan
     } else {
       tripPlan.value = revisedPlan
@@ -892,15 +881,7 @@ const getRevisionStageIcon = (stage: string): string => ({
 
 
 
-const getScheduleIcon = (type: string) => ({
-  meal: '餐', transport: '行', attraction: '游', hotel: '住', break: '歇'
-}[type] || '·')
-
 // 景点卡片只展示建议游玩时长，不展示容易被误认为承诺的精确到达/游玩时段。
-const displaySchedule = (schedule: ScheduleItem[] = []) => schedule.filter(slot =>
-  slot.item_type !== 'attraction'
-  && !(slot.item_type === 'transport' && slot.title.startsWith('前往 '))
-)
 
 const scheduleTimeLabel = (time: string, dayOffset = 0) => `${dayOffset === 1 ? '次日 ' : dayOffset > 1 ? `次日+${dayOffset - 1} ` : ''}${time}`
 const journeyArrivalLabel = (journey: NonNullable<TripPlan['intercity_journey']>) => {
@@ -927,7 +908,7 @@ const saveChanges = async () => {
     if (tripPlan.value) {
       sessionStorage.setItem('tripPlan', JSON.stringify(tripPlan.value))
       if (savedTrip.value) {
-        savedTrip.value = await saveTripVersion(savedTrip.value.id, tripPlan.value, '手动调整景点顺序或内容')
+        savedTrip.value = await saveTripVersion(savedTrip.value.id, tripPlan.value, '手动调整景点顺序或内容', savedTrip.value.current_version)
         tripPlan.value = savedTrip.value.plan
       }
     }
@@ -953,7 +934,7 @@ const restoreVersion = async (version: number) => {
   if (!savedTrip.value) return
   restoringVersion.value = version
   try {
-    savedTrip.value = await restoreTripVersion(savedTrip.value.id, version)
+    savedTrip.value = await restoreTripVersion(savedTrip.value.id, version, savedTrip.value.current_version)
     tripPlan.value = savedTrip.value.plan
     sessionStorage.setItem('tripPlan', JSON.stringify(tripPlan.value))
     historyOpen.value = false
@@ -995,22 +976,14 @@ const moveAttraction = (dayIndex: number, attrIndex: number, direction: 'up' | '
 
   const day = tripPlan.value.days[dayIndex]
   const attractions = day.attractions
+  // Pin the default first selection before reordering, so its detail stays selected.
+  selectedAttraction.value = selectedStop.value?.item || null
 
   if (direction === 'up' && attrIndex > 0) {
     [attractions[attrIndex], attractions[attrIndex - 1]] = [attractions[attrIndex - 1], attractions[attrIndex]]
   } else if (direction === 'down' && attrIndex < attractions.length - 1) {
     [attractions[attrIndex], attractions[attrIndex + 1]] = [attractions[attrIndex + 1], attractions[attrIndex]]
   }
-}
-
-const getMealLabel = (type: string): string => {
-  const labels: Record<string, string> = {
-    breakfast: '早餐',
-    lunch: '午餐',
-    dinner: '晚餐',
-    snack: '小吃'
-  }
-  return labels[type] || type
 }
 
 const getSourceColor = (sourceType: string): string => ({
@@ -1531,6 +1504,11 @@ const exportAsPDF = async () => {
 
 // 初始化地图
 const initMap = async () => {
+  if (mapLoading.value) return
+  // The loader exposes reset at runtime, but its bundled declaration omits it.
+  if (mapFailed.value) (AMapLoader as typeof AMapLoader & { reset(): void }).reset()
+  mapLoading.value = true
+  mapFailed.value = false
   try {
     const AMap = await AMapLoader.load({
       key: import.meta.env.VITE_AMAP_WEB_JS_KEY,  // 高德地图Web端(JS API) Key
@@ -1539,6 +1517,7 @@ const initMap = async () => {
     })
 
     // 创建地图实例
+    if (map) map.destroy()
     map = new AMap.Map('amap-container', {
       zoom: 12,
       center: [116.397128, 39.916527], // 默认中心点(北京)
@@ -1548,8 +1527,11 @@ const initMap = async () => {
     // 绘制行程路线（默认全程总览）
     drawRoutes(AMap)
   } catch (error) {
+    mapFailed.value = true
     console.error('地图加载失败:', error)
     message.error('地图加载失败')
+  } finally {
+    mapLoading.value = false
   }
 }
 
@@ -1578,7 +1560,19 @@ const drawRoutes = (AMap: any) => {
   days.forEach(day => {
     const color = DAY_COLORS[day.day_index % DAY_COLORS.length]
     const points: [number, number][] = []
-    // 当日动线：首地点 -> 各景点（酒店有坐标时作为起终点参与连线）
+    // Lodging is an independent marker, not an extra attraction or an invented route leg.
+    if (day.hotel && validHotelLocation(day.hotel)) {
+      const hotel = day.hotel
+      const position: [number, number] = [hotel.location!.longitude, hotel.location!.latitude]
+      const marker = new AMap.Marker({ position, title: hotel.name, anchor: 'center',
+        content: '<div style="width:30px;height:30px;border-radius:9px;background:#167c80;color:white;display:grid;place-items:center;font-size:14px;font-weight:600;border:2px solid white;box-shadow:0 2px 6px #0003">住</div>' })
+      marker.setMap(map)
+      marker.on('click', () => selectHotel(hotel, day.day_index))
+      markerByName.set(`hotel:${day.day_index}`, marker)
+      mapOverlays.push(marker)
+      allPoints.push(position)
+    }
+    // 当日动线仅连接景点；酒店独立标记，不虚构往返交通。
     day.attractions.forEach(attraction => {
       if (attraction.location?.longitude && attraction.location?.latitude) {
         points.push([attraction.location.longitude, attraction.location.latitude])
@@ -1601,9 +1595,9 @@ const drawRoutes = (AMap: any) => {
 
     // 编号标记：与行程卡片编号一一对应（单日模式下为当日序号）
     let numberInDay = 0
-    day.attractions.forEach(attraction => {
+    day.attractions.forEach((attraction, index) => {
       if (!attraction.location?.longitude || !attraction.location?.latitude) return
-      numberInDay += 1
+      numberInDay = index + 1
       const marker = new AMap.Marker({
         position: [attraction.location.longitude, attraction.location.latitude],
         title: attraction.name,
@@ -1614,7 +1608,7 @@ const drawRoutes = (AMap: any) => {
       mapOverlays.push(marker)
       markerByName.set(attraction.name, marker)
       // 点击标记：滚动定位到对应的行程卡片并高亮一下
-      marker.on('click', () => focusAttractionCard(attraction.name))
+      marker.on('click', () => selectStop(attraction))
     })
   })
 
@@ -1657,6 +1651,8 @@ const weatherIcon = (dayWeather: string): string => {
 
 // 点地图标记 -> 滚动到行程卡片并短暂高亮
 const focusAttractionCard = (name: string) => {
+  const stop = visibleStops.value.find(entry => entry.item.name === name)
+  if (stop) selectStop(stop.item)
   // 卡片可能不在当前选中日：先切到所在日再定位
   const card = document.querySelector(`[data-attraction-name="${CSS.escape(name)}"]`)
   card?.scrollIntoView({ behavior: 'smooth', block: 'center' })
@@ -2598,6 +2594,18 @@ const redrawRoutes = async () => {
 .nav-ghost:hover { color: #fff; border-color: rgba(255, 255, 255, .4); }
 .nav-ghost:disabled { opacity: .4; cursor: not-allowed; }
 .nav-ghost.accent { border-color: #ff6b4a; color: #ff8b73; }
+.nav-ghost.assistant-nav { border-color: #74d7e4; color: #9be9f2; background: rgba(69, 197, 215, .1); }
+.assistant-entry { margin: 0 0 24px; padding: 20px 22px; border: 1px solid rgba(116, 215, 228, .25); border-radius: 18px; background: linear-gradient(115deg, rgba(65, 166, 191, .15), rgba(83, 119, 177, .08)); }
+.assistant-entry-copy { display: flex; gap: 14px; align-items: flex-start; }
+.assistant-entry-mark { color: #8be7f1; font-size: 28px; line-height: 1.4; }
+.assistant-entry h3 { color: #ecfbff; margin: 0 0 6px; font-size: 17px; }
+.assistant-entry p { color: #a9becd; margin: 0; font-size: 13px; line-height: 1.8; }
+.assistant-quick-questions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.assistant-quick-questions button { padding: 9px 13px; border: 1px solid rgba(157, 213, 226, .22); border-radius: 10px; color: #c4e8ef; background: rgba(18, 37, 62, .25); font-size: 12px; cursor: pointer; }
+.assistant-quick-questions button:hover { border-color: #74d7e4; }
+.assistant-quick-questions .assistant-entry-action { color: #112e3a; background: #a0e6ef; font-weight: 700; }
+.assistant-quick-questions button:disabled { opacity: .45; cursor: not-allowed; }
+.assistant-entry > small { display: block; color: #dfbf91; margin-top: 10px; font-size: 12px; }
 .nav-ghost i {
   font-style: normal;
   padding: 1px 6px;
@@ -2700,3 +2708,4 @@ const redrawRoutes = async () => {
   .day-tabs { top: 116px; }
 }
 </style>
+<style scoped src="../styles/result-journal.css"></style>
