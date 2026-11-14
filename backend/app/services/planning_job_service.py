@@ -15,7 +15,6 @@ from threading import Lock, RLock, Event
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
-from ..agents.trip_planner_agent import get_trip_planner_agent
 from ..config import get_settings
 from .planning_metrics_service import advance_stage, new_metrics, project_metrics
 from ..graphs.planning_graph import run_planning_graph
@@ -319,8 +318,7 @@ class PlanningJobService:
         return True
 
     def create_plan(self, request: TripRequest, job_id: str = '') -> PlanningJobResponse:
-        # 阶段 C：规划编排已迁入 LangGraph（行为等价）；修订仍走 revise_trip，
-        # RevisionGraph 在下一阶段接入。
+        # 所有新规划都由同一个 LangGraph 内核执行。
         if self._use_redis():
             return self._create_redis_job(
                 "plan", {"request": request.model_dump(mode="json")}, job_id=job_id

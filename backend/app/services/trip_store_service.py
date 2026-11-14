@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from uuid import uuid4
+
+from ..infrastructure.database import DEFAULT_DATABASE_PATH, connect, transaction
 
 from ..models.schemas import (
     SavedTripCreate,
@@ -22,7 +23,7 @@ from ..models.schemas import (
     TripProgressResponse,
     UserPreferences,
 )
-from .itinerary_schedule_service import itinerary_schedule_service
+from .trip_projection_service import project_stored_plan
 from .trip_quality_service import trip_quality_service
 
 
@@ -30,30 +31,17 @@ class TripStoreService:
     """Persist trips locally without requiring an external database service."""
 
     def __init__(self, database_path: str | Path | None = None) -> None:
-        default_path = Path(__file__).resolve().parents[2] / "data" / "tripmind.db"
-        self.database_path = Path(database_path or default_path)
+        self.database_path = Path(database_path or DEFAULT_DATABASE_PATH)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        return connect(self.database_path)
 
-    @contextmanager
     def _connection(self):
-        """提交或回滚事务，并确保 SQLite 文件句柄及时释放。"""
-        connection = self._connect()
-        try:
-            yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        """保留存储层事务边界，复用统一的连接生命周期。"""
+        return transaction(self._connect())
 
     def _initialize(self) -> None:
         with self._connection() as connection:
@@ -147,41 +135,7 @@ class TripStoreService:
                 (trip_id,),
             ).fetchall()
         summary = self._summary(row)
-        plan = TripPlan.model_validate_json(row["plan_json"])
-        duplicate_warnings = trip_quality_service.remove_duplicate_attractions(plan)
-        if duplicate_warnings:
-            plan.warnings = [
-                warning for warning in plan.warnings
-                if "在多天行程中重复出现" not in warning
-            ]
-            plan.warnings.extend(duplicate_warnings)
-        if any(not day.schedule for day in plan.days):
-            plan = itinerary_schedule_service.build(plan)
-        # 使用model_construct跳过验证，避免历史行程日期过期导致验证失败
-        import json
-        request_data = json.loads(row["request_json"])
-        request = TripRequest.model_construct(**request_data)
-        # Reconstruct nested historical candidates before deriving source-backed reminders.
-        from ..models.candidate import CandidatePlace
-        request.candidate_places = [CandidatePlace.model_validate(c) for c in request_data.get('candidate_places', [])]
-        from .attraction_advisory_service import enrich_advisories
-        plan.warnings = list(dict.fromkeys([*plan.warnings, *enrich_advisories(plan, request)]))
-        # Repair historical zero defaults in the read projection, without rewriting saved versions.
-        from .price_reference_service import apply_price_references
-        apply_price_references(plan)
-        if plan.budget:
-            old_total = plan.budget.total_attractions
-            from .price_reference_service import attraction_cost
-            from math import ceil
-            ticket_total = ceil(sum(attraction_cost(a) for d in plan.days for i, a in enumerate(d.attractions)
-                               if not d.schedule or any(s.item_type == 'attraction' and s.related_index == i for s in d.schedule)) * request.travelers)
-            plan.budget.total += ticket_total - old_total
-            plan.budget.total_attractions = ticket_total
-            plan.budget.per_person = round(plan.budget.total / request.travelers)
-            plan.budget.over_budget = request.budget_limit is not None and plan.budget.total > request.budget_limit
-            note = '景点/住宿优先高德人均消费参考；未知部分未计入，非门票或酒店实时报价。'
-            if note not in plan.budget.calculation_note:
-                plan.budget.calculation_note += note
+        request, plan = project_stored_plan(row["plan_json"], row["request_json"])
         return SavedTripDetail.model_construct(
             **summary.model_dump(),
             request=request,
@@ -207,6 +161,7 @@ class TripStoreService:
             # 使用model_construct跳过验证，避免历史行程日期过期导致验证失败
             import json
             request_data = json.loads(row["request_json"])
+            request_data.setdefault('destination_only', False)
             request = TripRequest.model_construct(**request_data)
             current_plan = TripPlan.model_validate_json(row["plan_json"])
             journey_count = 2 if request.trip_type == "round_trip" else 1

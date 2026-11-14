@@ -201,6 +201,16 @@ class RedisStageDTestCase(unittest.TestCase):
     # -- 图片缓存（阶段 F 起点） -------------------------------------------
 
     def test_attraction_image_cache_roundtrip(self):
+        from app.config import get_settings
+        from app.infrastructure.shared_cache import SharedCache
+        settings = get_settings().model_copy(update={"cache_enabled": True})
+        cache = SharedCache()
+        with mock.patch("app.infrastructure.shared_cache.get_settings", return_value=settings), \
+             mock.patch("app.services.attraction_image_service.shared_cache", cache), \
+             mock.patch.object(cache, "_redis", return_value=fakeredis.FakeRedis()):
+            self._check_image_cache_roundtrip()
+
+    def _check_image_cache_roundtrip(self):
         result = {
             "photo_url": "https://example.com/gugong.jpg",
             "source": "高德地图",

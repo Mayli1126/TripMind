@@ -15,32 +15,11 @@ from ...models.schemas import (
     TripRevisionRequest,
     JobResumeRequest,
 )
-from ...agents.trip_planner_agent import get_trip_planner_agent
 from ...config import get_settings
 from ...services.amap_service import get_amap_service
-from ...services.auth_service import auth_service
 from ..auth import current_user
 from ...services.runtime_service import require_planning_runtime
-
-
-def _enforce_quota(request: Request) -> None:
-    """设备级每日提交配额（redis_enabled 时生效）。超限返回 429。"""
-    settings = get_settings()
-    if not settings.redis_enabled or settings.plan_quota_per_day <= 0:
-        return
-    from ...infrastructure import redis_client
-
-    client_id = getattr(request.state, "user", {}).get("id") or (
-        request.client.host if request.client else "anonymous"
-    )
-    allowed, used = redis_client.quota_check_and_incr(
-        client_id, settings.plan_quota_per_day
-    )
-    if not allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"今日提交次数已达上限({settings.plan_quota_per_day})，请明日再试",
-        )
+from ...services import planning_application_service
 from ...services.planning_job_service import planning_job_service
 
 router = APIRouter(prefix="/trip", tags=["旅行规划"])
@@ -53,16 +32,7 @@ router = APIRouter(prefix="/trip", tags=["旅行规划"])
     summary="创建异步旅行规划任务",
 )
 async def create_planning_job(request: TripRequest, raw_request: Request):
-    from ...services.job_submission_service import submit_once
-    payload=request.model_dump(mode='json',exclude={'memory_context','conversation_context'})
-    def create(job_id):
-        require_planning_runtime(); _enforce_quota(raw_request)
-        from ...services.conversation_store import memory_context
-        from ...services.conversation_summary_service import summary_for
-        request.memory_context=memory_context(current_user(raw_request)['id'],request.city)
-        request.conversation_context=summary_for(current_user(raw_request)['id'],request.conversation_id,'planner')[0][:4200]
-        return planning_job_service.create_plan(request,job_id=job_id)
-    return await run_in_threadpool(submit_once,raw_request,'plan',payload,create)
+    return await run_in_threadpool(planning_application_service.submit_plan, raw_request, request)
 
 
 @router.post(
@@ -72,16 +42,7 @@ async def create_planning_job(request: TripRequest, raw_request: Request):
     summary="创建自然语言行程修改任务",
 )
 async def create_revision_job(request: TripRevisionRequest, raw_request: Request):
-    from ...services.job_submission_service import submit_once
-    payload=request.model_dump(mode='json')
-    payload['trip_request'].pop('memory_context',None); payload['trip_request'].pop('conversation_context',None)
-    def create(job_id):
-        require_planning_runtime(); _enforce_quota(raw_request)
-        from ...services.conversation_store import memory_context
-        request.trip_request.memory_context=memory_context(current_user(raw_request)['id'],request.trip_request.city)
-        return planning_job_service.create_revision(request.trip_request,request.plan,request.instruction,
-                                                   base_version=request.base_version,job_id=job_id)
-    return await run_in_threadpool(submit_once,raw_request,'revision',payload,create)
+    return await run_in_threadpool(planning_application_service.submit_revision, raw_request, request)
 
 
 @router.get(
@@ -201,58 +162,45 @@ async def stream_planning_events(job_id: str, request: Request):
 
 @router.post(
     "/plan",
+    deprecated=True,
     response_model=TripPlanResponse,
     summary="生成旅行计划",
     description="根据用户输入的旅行需求,生成详细的旅行计划"
 )
-async def plan_trip(request: TripRequest):
+async def plan_trip(request: TripRequest, raw_request: Request):
+    """兼容旧客户端的同步响应；执行仍使用统一任务队列。
+
+    需要用户确认或超过等待时间时返回任务编号，客户端可继续查询，
+    不再另起一条不受配额和并发限制的规划流程。
     """
-    生成旅行计划
-
-    Args:
-        request: 旅行请求参数
-
-    Returns:
-        旅行计划响应
-    """
-    require_planning_runtime()
-    try:
-        print(f"\n{'='*60}")
-        print(f"📥 收到旅行规划请求:")
-        print(f"   城市: {request.city}")
-        print(f"   日期: {request.start_date} - {request.end_date}")
-        print(f"   天数: {request.travel_days}")
-        print(f"{'='*60}\n")
-
-        # 获取Agent实例
-        print("🔄 获取多智能体系统实例...")
-        agent = get_trip_planner_agent()
-
-        # 生成旅行计划
-        print("🚀 开始生成旅行计划...")
-        # HelloAgents/MCP 当前提供同步调用；放入线程池避免阻塞 FastAPI 事件循环。
-        trip_plan = await run_in_threadpool(agent.plan_trip, request)
-
-        print("✅ 旅行计划生成成功,准备返回响应\n")
-
-        return TripPlanResponse(
-            success=True,
-            message=(
-                "外部服务不可用，已返回带明确标记的参考计划"
-                if trip_plan.is_fallback
-                else "旅行计划生成成功"
-            ),
-            data=trip_plan
-        )
-
-    except Exception as e:
-        print(f"❌ 生成旅行计划失败: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail=f"生成旅行计划失败: {str(e)}"
-        )
+    job = await run_in_threadpool(planning_application_service.submit_plan, raw_request, request)
+    settings = get_settings()
+    deadline = asyncio.get_running_loop().time() + settings.planning_job_timeout_seconds
+    while True:
+        if job.status == "completed" and job.data is not None:
+            return TripPlanResponse(
+                success=True,
+                message="已生成参考计划" if job.data.is_fallback else "旅行计划生成成功",
+                data=job.data,
+            )
+        if job.status == "waiting_input":
+            raise HTTPException(409, detail={
+                "message": "需要确认后才能继续，请使用任务接口提交选择",
+                "job_id": job.job_id, "waiting_input": job.waiting_input,
+            })
+        if job.status in {"failed", "cancelled"}:
+            raise HTTPException(502, detail={
+                "message": job.error or "任务未完成，请通过任务接口查看详情",
+                "job_id": job.job_id,
+            })
+        if asyncio.get_running_loop().time() >= deadline:
+            raise HTTPException(504, detail={
+                "message": "同步等待已结束，任务未被取消，请通过任务接口继续查询",
+                "job_id": job.job_id,
+            })
+        # 等待让出事件循环；状态读取可能访问 Redis，放在线程池执行。
+        await asyncio.sleep(0.5)
+        job = await run_in_threadpool(planning_job_service.get, job.job_id)
 
 
 @router.get(
@@ -261,30 +209,16 @@ async def plan_trip(request: TripRequest):
     description="检查旅行规划服务是否正常"
 )
 async def health_check():
-    """健康检查"""
-    try:
-        # 检查Agent是否可用
-        agent = get_trip_planner_agent()
-        
-        return {
-            "status": "healthy",
-            "service": "trip-planner",
-            "agent_name": agent.planner_agent.name,
-            "tools_count": sum(
-                len(item.list_tools())
-                for item in (
-                    agent.attraction_agent,
-                    agent.weather_agent,
-                    agent.hotel_agent,
-                    agent.transport_agent,
-                )
-            )
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"服务不可用: {str(e)}"
-        )
+    """仅查看运行状态，探针不创建 Agent 或启动地图子进程。"""
+    from ...services.runtime_service import runtime_status
+    state = await run_in_threadpool(runtime_status)
+    if not state["ready"]:
+        raise HTTPException(503, detail={"message": "规划服务尚未就绪", "runtime": state})
+    return {
+        "status": "healthy",
+        "service": "trip-planner",
+        "runtime": state,
+    }
 
 
 @router.post(

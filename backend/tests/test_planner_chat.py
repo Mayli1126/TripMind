@@ -44,6 +44,30 @@ class PlannerChatTests(unittest.TestCase):
         self.assertEqual(retry.args[0][1]['content'], '都行，你看着安排')
         self.assertGreaterEqual(retry.kwargs['max_tokens'], 8192)
 
+    def test_destination_only_does_not_require_origin_and_discards_legacy_tickets(self):
+        self.client.invoke.return_value = self.response({'preferences_confirmed': True, 'origin_city': '武汉',
+                                                        'departure_time': '08:00', 'arrival_time': '12:00'})
+        draft = {k:v for k,v in self.draft.items() if k != 'origin_city'}
+        result = service.chat_about_trip(self.payload(draft=draft))
+        self.assertTrue(result.ready)
+        self.assertTrue(result.request.destination_only)
+        self.assertEqual(result.request.origin_city, '')
+        self.assertIsNone(result.request.departure_time)
+        self.assertEqual(result.request.transportation, '公共交通')
+
+    def test_destination_request_skips_intercity_budget_and_time(self):
+        from tests.test_trip_quality import make_request, make_day
+        from app.models.schemas import TripRequest, TripPlan
+        from app.services.trip_quality_service import trip_quality_service
+        from app.services.day_pipeline_service import build_day_capacities
+        request = TripRequest.model_validate({**make_request().model_dump(), 'destination_only': True})
+        plan = TripPlan(city=request.city, start_date=request.start_date, end_date=request.end_date,
+                        days=[make_day(0, 10), make_day(1, 10)], overall_suggestions='fixture')
+        self.assertIsNone(trip_quality_service._build_intercity_journey(request, None, None))
+        self.assertIsNone(trip_quality_service._build_return_journey(request, None, None))
+        self.assertEqual(trip_quality_service.calculate_budget(plan, request, 999).intercity_transportation, 0)
+        self.assertFalse(any('抵达后' in c.note or '返程' in c.note for c in build_day_capacities(request, None)))
+
     def test_invalid_updates_retries_instead_of_attribute_error(self):
         self.client.invoke.side_effect = ['{"reply":"好","updates":[]}', self.response()]
         self.assertFalse(service.chat_about_trip(self.payload()).ready)

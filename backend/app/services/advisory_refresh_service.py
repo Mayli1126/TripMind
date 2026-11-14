@@ -7,12 +7,12 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel, Field
+from ..infrastructure.database import application_database
 from ..config import get_settings
-from .auth_service import auth_service
 
 
 def initialize():
-    with auth_service.connection() as db:
+    with application_database.connection() as db:
         db.execute('CREATE TABLE IF NOT EXISTS advisory_cache (cache_key TEXT PRIMARY KEY, value_json TEXT NOT NULL)')
 
 
@@ -22,7 +22,7 @@ def key(poi_id, visit_date):
 
 def cached(poi_id, visit_date):
     try:
-        with auth_service.connection() as db:
+        with application_database.connection() as db:
             row = db.execute('SELECT value_json FROM advisory_cache WHERE cache_key=?', (key(poi_id, visit_date),)).fetchone()
     except sqlite3.OperationalError:
         return {}
@@ -68,7 +68,7 @@ def refresh(poi_id, visit_date):
     value['last_attempt'] = now.isoformat()
     # Short backoff on partial failure; successful facts carry independent expiry times.
     value['next_check'] = (now + timedelta(minutes=10 if errors else 60)).isoformat()
-    with auth_service.connection() as db:
+    with application_database.connection() as db:
         db.execute('INSERT OR REPLACE INTO advisory_cache VALUES (?, ?)', (key(poi_id, visit_date), json.dumps(value, ensure_ascii=False)))
     return value
 
@@ -141,7 +141,7 @@ def refresh_due():
     today = get_app_today()
     end = today + timedelta(days=7)
     initialize()
-    with auth_service.connection() as db:
+    with application_database.connection() as db:
         ids = [row['id'] for row in db.execute('SELECT id FROM trips')]
     count = 0
     for trip_id in ids:

@@ -276,6 +276,16 @@ def transition_job(job_id, allowed, **fields):
 
 
 def guarded_job_write(job_id, token, fields, allowed=None):
+    """
+    守卫式写入任务字段：仅当「任务存在 + 租约令牌匹配 + 状态合法」时才写入。
+
+    - token: 租约令牌。持锁 worker 写状态时传入自己的 token 验明正身；
+             None 表示无租约要求（管理面直接写）
+    - fields: 要写入的字段字典（值可为任意类型，统一规整为字符串）
+    - allowed: 允许的状态白名单（如只许 RUNNING→SUCCEEDED），None 不限
+
+    返回 True=写入成功；False=任务消失/令牌不符/状态不允许/重试 8 轮全撞车
+    """
     from redis.exceptions import WatchError
     key=f'trip:job:{job_id}'; lease=f'{key}:lease'; client=_get_client()
     for _ in range(8):

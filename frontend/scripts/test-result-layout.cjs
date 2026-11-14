@@ -24,7 +24,7 @@ async function main() {
       { day_index: 0, date: '2026-11-02', theme: '海风与老城漫步', attractions: ['栈桥', '圣弥厄尔教堂', '大学路', '小鱼山'].map(attraction), meals: [{ type: 'lunch', name: '老城午餐' }], schedule: [], description: '老城慢游', transportation: '步行与公共交通', accommodation: '经济型酒店' },
       { day_index: 1, date: '2026-11-03', theme: '沿海岸去看世界', attractions: ['八大关', '第二海水浴场', '五四广场'].map(attraction), meals: [], schedule: [] }
     ] }
-    plan.days[0].hotel = { name: '示例参考民宿', type: '舒适型酒店', price_range: '约¥500/晚', address: '示例地址', rating: '', distance: '' }
+    plan.days[0].hotel = { name: '示例参考民宿', type: '舒适型酒店', estimated_cost: 500, price_range: '约¥500/晚', address: '示例地址', rating: '', distance: '' }
     plan.weather_info = [{ date: '2026-11-02', day_weather: '晴', night_weather: '多云', day_temp: 23, night_temp: 16, wind_direction: '东南风', wind_power: '1-3级' }]
     plan.budget = { total_attractions: 120, total_hotels: 500, total_meals: 200, total_transportation: 180, per_person: 1000, total: 1000, over_budget: false, calculation_note: '用于布局测试的参考费用，非实时价格。' }
     await page.addInitScript(plan => {
@@ -35,7 +35,22 @@ async function main() {
     await page.goto('http://127.0.0.1:5175/result')
     await page.addStyleTag({ content: 'html { scroll-behavior: auto !important } .ant-message { display: none !important }' })
     await page.locator('.stop-row').first().waitFor()
+    // 升级 jsPDF 后验证真实导出链路，而不只检查页面可以构建。
+    await page.getByRole('button', { name: '导出行程', exact: true }).click()
+    const downloadReady = page.waitForEvent('download', { timeout: 60000 })
+    await page.getByText('导出为 PDF', { exact: true }).click()
+    const download = await downloadReady
+    const pdf = fs.readFileSync(await download.path())
+    assert.equal(pdf.subarray(0, 5).toString(), '%PDF-')
+    assert.ok(pdf.length > 1000, 'PDF contains the rendered itinerary')
+    assert.ok((pdf.toString('latin1').match(/\/Type \/Page\b/g) || []).length >= 1)
     assert.equal(await page.locator('.stop-row').count(), 4)
+    assert.equal(await page.locator('.coverflow.is-panorama').count(), 0, 'overview uses the restored layered cards')
+    assert.ok(await page.locator('.cover-card').nth(1).evaluate(el => getComputedStyle(el).transform !== 'none'))
+    assert.equal(await page.locator('.cover-card.is-active').getAttribute('data-attraction-name'), '栈桥')
+    await page.getByRole('button', { name: '下一个景点', exact: true }).click()
+    assert.equal(await page.locator('.cover-card.is-active').getAttribute('data-attraction-name'), '圣弥厄尔教堂')
+    await page.getByRole('button', { name: '上一个景点', exact: true }).click()
     assert.equal(await page.locator('.day-tabs').count(), 0, 'no floating overview/day tab bar')
     assert.equal(await page.locator('#weather').count(), 0, 'no duplicate standalone weather panel')
     assert.equal(await page.locator('.nav-tab').filter({ hasText: '天气信息' }).count(), 0)
@@ -50,7 +65,7 @@ async function main() {
     assert.equal(await page.locator('.stop-detail h2').textContent(), '八大关')
     assert.ok(await page.getByRole('button', { name: '后一天', exact: true }).isDisabled())
     await page.getByRole('button', { name: '前一天', exact: true }).click()
-    await page.getByRole('button', { name: '✏️ 编辑行程' }).click()
+    await page.getByRole('button', { name: '编辑行程', exact: true }).click()
     await page.getByRole('button', { name: '↓ 下移', exact: true }).click()
     assert.match(await page.locator('.stop-row').nth(1).textContent(), /栈桥/)
     assert.equal(await page.locator('.stop-detail h2').textContent(), '栈桥')
@@ -71,7 +86,7 @@ async function main() {
     assert.equal(await page.locator('.hotel-row').count(), 1)
     await page.locator('.hotel-row').click()
     assert.equal(await page.locator('#budget .hotel-card').count(), 0)
-    assert.match(await page.locator('.hotel-detail .stay-reference').textContent(), /示例参考民宿[\s\S]*约¥500/)
+    assert.match(await page.locator('.hotel-detail .stay-reference').textContent(), /示例参考民宿[\s\S]*约\s*¥500/)
     assert.match(await page.locator('.hotel-location-note').textContent(), /暂无有效坐标/)
     await page.getByRole('button', { name: '后一天', exact: true }).click()
     assert.equal(await page.locator('.hotel-row').count(), 0)
@@ -81,6 +96,8 @@ async function main() {
     const out = fs.mkdtempSync(path.join(os.tmpdir(), 'tripmind-layout-'))
     await page.locator('.itinerary-workspace').screenshot({ path: path.join(out, 'stay-desktop.png') })
     await page.locator('.stop-row').first().click()
+    await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }))
+    await page.screenshot({ path: path.join(out, 'top-desktop.png') })
     await page.locator('#overview').screenshot({ path: path.join(out, 'overview.png') })
     await page.locator('#budget').screenshot({ path: path.join(out, 'budget.png') })
     await page.locator('#days').evaluate(el => el.scrollIntoView({ block: 'start' }))
@@ -90,7 +107,8 @@ async function main() {
       return { leftWidth: a.width, rightWidth: b.width, separated: a.right <= b.left }
     })
     assert.ok(geometry.separated)
-    assert.ok(Math.abs(geometry.leftWidth - geometry.rightWidth) < 2)
+    assert.ok(Math.abs(geometry.leftWidth - 320) < 2, 'desktop route list stays compact at 320px')
+    assert.ok(geometry.rightWidth > geometry.leftWidth * 1.5, 'map and detail receive the remaining space')
     const inspectorLayout = await page.locator('.itinerary-inspector').evaluate(el => ({
       overflow: getComputedStyle(el).overflowY,
       mapHeight: el.children[0].getBoundingClientRect().height,
@@ -98,7 +116,7 @@ async function main() {
     }))
     assert.equal(inspectorLayout.overflow, 'visible', 'inspector should use page scrolling')
     const mapCanvasHeight = await page.locator('.explorer-map .map-section').evaluate(el => el.getBoundingClientRect().height)
-    assert.ok(mapCanvasHeight >= 190 && mapCanvasHeight <= 300, 'map should leave room for the introduction')
+    assert.ok(mapCanvasHeight >= 240 && mapCanvasHeight <= 340, 'wide map should still leave room for the introduction')
     for (const height of [768, 900, 1100]) {
       await page.setViewportSize({ width: 1440, height })
       await page.locator('.day-section').evaluate(el => el.scrollIntoView({ block: 'start', behavior: 'instant' }))
@@ -135,6 +153,7 @@ async function main() {
     revised.days[0].attractions[0].name = '栈桥（调整后）'
     revised.revision_diff = []
     const records = new Map()
+    let addedInstruction = ''
     const headers = { 'Access-Control-Allow-Origin': 'http://127.0.0.1:5175', 'Access-Control-Allow-Credentials': 'true' }
     await page.route('**/api/**', async route => {
       const request = route.request(), url = new URL(request.url()), method = request.method()
@@ -147,7 +166,11 @@ async function main() {
           json = { ...data, id, revision: data.revision + 1 }
           records.set(id, json)
         } else json = id ? records.get(id) : [...records.values()]
-      } else if (url.pathname.endsWith('/assistant/messages')) json = { answer: '可以减少一天的步行量。', evidence: [], uncertainties: [], proposed_instruction: '第二天轻松一点', can_apply: true, base_version: 1 }
+      } else if (url.pathname === '/api/map/poi') { assert.equal(url.searchParams.get('city'), '青岛'); json = {success:true,data:[{id:'test-poi',name:'小鱼山公园',address:'青岛市测试地址',location:{longitude:120.33,latitude:36.06}}]} }
+      else if (url.pathname === '/api/trip/revision-jobs') { addedInstruction=request.postDataJSON().instruction; json={job_id:'add-job',status:'queued'} }
+      else if (url.pathname.endsWith('/add-job/events')) return route.fulfill({headers,contentType:'text/event-stream',body:'event: snapshot\ndata: {"status":"completed","message":"完成"}\n\n'})
+      else if (url.pathname.endsWith('/jobs/add-job')) json={status:'completed',data:revised}
+      else if (url.pathname.endsWith('/assistant/messages')) json = { answer: '可以减少一天的步行量。', evidence: [], uncertainties: [], proposed_instruction: '第二天轻松一点', can_apply: true, base_version: 1 }
       else if (url.pathname.endsWith('/assistant/revision-jobs')) json = { job_id: 'chat-job', status: 'queued' }
       else if (url.pathname.endsWith('/chat-job/events')) return route.fulfill({ headers, contentType: 'text/event-stream', body: 'event: snapshot\ndata: {"status":"completed","message":"完成"}\n\n' })
       else if (url.pathname.endsWith('/jobs/chat-job')) json = { status: 'completed', data: revised }
@@ -160,9 +183,13 @@ async function main() {
     await page.locator('.assistant-nav').click()
     const panel = page.locator('.assistant-page.embedded')
     await panel.locator('.welcome').waitFor()
-    await page.locator('.ant-drawer-content-wrapper').screenshot({ path: path.join(out, 'inline-chat-desktop.png') })
+    assert.equal(await page.locator('.assistant-entry').count(), 0, 'no duplicate conversation strip')
+    assert.equal(await page.locator('.ant-drawer-mask').count(), 0, 'chat must not lock the page')
+    await page.evaluate(() => window.scrollTo({ top: 400, behavior: 'instant' }))
+    assert.ok(await page.evaluate(() => scrollY > 0))
+    await page.screenshot({ path: path.join(out, 'inline-chat-desktop.png') })
     await page.setViewportSize({ width: 390, height: 844 })
-    await page.locator('.ant-drawer-content-wrapper').screenshot({ path: path.join(out, 'inline-chat-mobile.png') })
+    await page.locator('.assistant-dock').screenshot({ path: path.join(out, 'inline-chat-mobile.png') })
     await page.setViewportSize({ width: 1440, height: 1000 })
     const resultUrl = page.url()
     assert.ok(resultUrl.endsWith('/result'), 'opening conversation must not navigate')
@@ -177,13 +204,35 @@ async function main() {
     await page.locator('.stop-row').filter({ hasText: '栈桥（调整后）' }).waitFor()
     assert.equal(page.url(), resultUrl)
     await panel.getByText('已保存为 v2。', { exact: false }).waitFor()
-    await page.locator('.ant-drawer-close').click()
-    await panel.waitFor({ state: 'detached' })
+    await page.getByRole('button', { name: '收起行程对话' }).click()
+    await panel.waitFor({ state: 'hidden' })
     await page.locator('.assistant-nav').click()
     await page.locator('.assistant-page.embedded .bubble').filter({ hasText: '第二天轻松一点' }).first().waitFor()
-    await page.locator('.ant-drawer-close').click()
+    await page.getByRole('button', { name: '收起行程对话' }).click()
+    await panel.waitFor({ state: 'hidden' })
+    await page.getByRole('button', { name: '更多行程工具' }).click()
+    await page.getByRole('menuitem', { name: '用文字修改行程', exact: true }).click()
+    await page.getByText('告诉 TripMind 你想调整什么', { exact: true }).waitFor()
+    await page.locator('.ant-drawer-open .ant-drawer-close').click()
+    await page.getByRole('button', { name: '更多行程工具' }).click()
+    await page.getByRole('menuitem', { name: /历史版本/ }).click()
+    await page.getByText('每次修改都可以反悔', { exact: true }).waitFor()
+    await page.locator('.ant-drawer-open .ant-drawer-close').click()
+    await page.locator('.ant-drawer-content:visible').waitFor({ state: 'hidden' })
+    await page.getByRole('button', { name: '在栈桥（调整后）后添加地点', exact:true }).click()
+    await page.getByRole('textbox', { name:'搜索地点', exact:true }).fill('小鱼山')
+    await page.getByRole('button', { name:'搜索', exact:true }).click()
+    await page.locator('.place').filter({hasText:'小鱼山公园'}).click()
+    await page.getByText('确认 AI 修改内容', {exact:true}).waitFor()
+    assert.match(addedInstruction, /小鱼山公园/)
+    assert.match(addedInstruction, /第1个景点之后/)
+    assert.equal(await page.locator('.stop-name').filter({hasText:'小鱼山公园'}).count(),0,'adding remains a draft until confirmation')
+    await page.getByRole('button',{name:'放弃本次修改',exact:true}).click()
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }))
+    await page.screenshot({ path: path.join(out, 'top-mobile.png') })
     assert.deepEqual(errors, [])
-    console.log('PASS: equal columns, selection, day switching, reorder/delete/cancel, map retry, enlarged map, page scrolling, long details, mobile layout')
+    console.log('PASS: layered gallery, compact list / wide map, selection, day switching, editing, map retry, long details, mobile layout, inline chat and tools')
     console.log('SCREENSHOTS', out)
   } finally { await browser.close() }
 }

@@ -166,43 +166,43 @@ class _RecordingPlanner:
         self.plan = plan
         self.prompts: list[str] = []
 
-    def _report_progress(self, callback, *args, **kwargs):
+    def report_progress(self, callback, *args, **kwargs):
         pass
 
-    def _build_attraction_query(self, request):
+    def build_attraction_query(self, request):
         return "query"
 
-    def _run_agent_safely(self, agent, query, stage):
+    def run_agent_safely(self, agent, query, stage):
         return ("资料", None)
 
-    def _query_transportation_context(self, request):
+    def query_transportation_context(self, request):
         return ("交通资料", 100, None)
 
-    def _build_planner_query(self, request, *args):
+    def build_planner_query(self, request, *args):
         return "BASE_QUERY"
 
-    def _run_agent_fresh(self, agent, query):
+    def run_agent_fresh(self, agent, query):
         self.prompts.append(query)
         return "response"
 
-    def _parse_response(self, response, request):
+    def parse_response(self, response, request):
         return self.plan
 
-    def _needs_repair(self, plan, request):
+    def needs_repair(self, plan, request):
         return False
 
-    def _plan_score(self, plan, request):
+    def plan_score(self, plan, request):
         return 1
 
-    def _repair_plan(self, request, response):
+    def repair_plan(self, request, response):
         return self.plan
 
-    def _create_fallback_plan(self, request, reason=""):
+    def create_fallback_plan(self, request, reason=""):
         plan = self.plan.model_copy(deep=True)
         plan.is_fallback = True
         return plan
 
-    def _friendly_error(self, exc):
+    def friendly_error(self, exc):
         return str(exc)
 
 

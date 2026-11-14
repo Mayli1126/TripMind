@@ -5,6 +5,7 @@ from typing import Any, Literal
 from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+from ...infrastructure.database import application_database
 from ..auth import current_user
 from ...services.auth_service import auth_service
 from ...services.conversation_store import memories
@@ -23,13 +24,13 @@ class ConversationWrite(BaseModel):
 
 @router.get('/conversations')
 def list_conversations(request: Request):
-    with auth_service.connection() as db:
+    with application_database.connection() as db:
         return [dict(row) for row in db.execute('SELECT id, kind, trip_id, title, revision, updated_at FROM conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT 100', (current_user(request)['id'],))]
 
 
 @router.get('/conversations/{conversation_id}')
 def get_conversation(conversation_id: str, request: Request):
-    with auth_service.connection() as db:
+    with application_database.connection() as db:
         row = db.execute('SELECT * FROM conversations WHERE id=? AND user_id=?', (conversation_id, current_user(request)['id'])).fetchone()
     if not row:
         raise HTTPException(404, '会话不存在')
@@ -51,7 +52,7 @@ def save_conversation(conversation_id: str, payload: ConversationWrite, request:
     raw = json.dumps(payload.snapshot, ensure_ascii=False)
     if len(raw.encode()) > 800000:
         raise HTTPException(413, '会话过长，请开始新对话')
-    with auth_service.connection() as db:
+    with application_database.connection() as db:
         db.execute('BEGIN IMMEDIATE')
         row = db.execute('SELECT * FROM conversations WHERE id=?', (conversation_id,)).fetchone()
         if row and row['user_id'] != user['id']:
@@ -72,7 +73,7 @@ def save_conversation(conversation_id: str, payload: ConversationWrite, request:
 
 @router.delete('/conversations/{conversation_id}')
 def delete_conversation(conversation_id: str, request: Request):
-    with auth_service.connection() as db:
+    with application_database.connection() as db:
         db.execute('DELETE FROM conversation_summaries WHERE conversation_id=? AND user_id=?', (conversation_id, current_user(request)['id']))
         db.execute('DELETE FROM conversations WHERE id=? AND user_id=?', (conversation_id, current_user(request)['id']))
     return {'deleted': True}
@@ -86,7 +87,7 @@ def list_memories(request: Request):
 
 @router.put('/memories/{memory_id}')
 def save_memory(memory_id: str, payload: MemoryWrite, request: Request):
-    with auth_service.connection() as db:
+    with application_database.connection() as db:
         db.execute('BEGIN IMMEDIATE')
         row = db.execute('SELECT * FROM preference_memories WHERE id=?', (memory_id,)).fetchone()
         if row and row['user_id'] != current_user(request)['id']:
@@ -125,7 +126,7 @@ def save_memory(memory_id: str, payload: MemoryWrite, request: Request):
 
 @router.delete('/memories/{memory_id}')
 def delete_memory(memory_id: str, request: Request, revision: int):
-    with auth_service.connection() as db:
+    with application_database.connection() as db:
         db.execute('BEGIN IMMEDIATE')
         row = db.execute('SELECT revision FROM preference_memories WHERE id=? AND user_id=?',
                          (memory_id, current_user(request)['id'])).fetchone()

@@ -35,6 +35,7 @@ def _request(days: int = 2, pace: str = "balanced") -> TripRequest:
     start = (date.today() + timedelta(days=30)).isoformat()
     end = (date.today() + timedelta(days=30 + days - 1)).isoformat()
     return TripRequest(
+        destination_only=False,  # Explicit legacy cross-city capacity coverage.
         origin_city="上海", city="北京", start_date=start, end_date=end,
         travel_days=days, transportation="high_speed_train", accommodation="舒适型酒店",
         pace=pace,  # type: ignore[arg-type]
@@ -218,13 +219,13 @@ class PipelineFallbackTestCase(unittest.TestCase):
         from tests.test_research_fanout import FanoutStubPlanner  # 复用桩
 
         planner = FanoutStubPlanner()
-        # _run_agent_fresh 返回 'response'（非 JSON）→ 骨架失败 → 回退旧路径成功
+        # run_agent_fresh 返回 'response'（非 JSON）→ 骨架失败 → 回退旧路径成功
         with mock.patch.object(pg, "_get_planner", return_value=planner), \
              mock.patch.object(pg, "get_checkpointer", return_value=None), \
              mock.patch.object(trip_quality_service, "finalize", side_effect=lambda p, r, **k: p), \
              mock.patch.object(trip_quality_service, "refine_overall_suggestions", side_effect=lambda p, r, **k: p.overall_suggestions), \
-             mock.patch.object(planner, "_needs_repair", return_value=False), \
-             mock.patch.object(planner, "_parse_response", return_value=_simple_plan()):
+             mock.patch.object(planner, "needs_repair", return_value=False), \
+             mock.patch.object(planner, "parse_response", return_value=_simple_plan()):
             plan = run_planning_graph(_request(days=1), None, job_id="pipe-fb-1")
         self.assertFalse(plan.is_fallback)
         # 两次 LLM 调用：骨架(失败) + 旧路径
@@ -240,21 +241,21 @@ class PipelineFallbackTestCase(unittest.TestCase):
         class SkeletonPlanner:
             planner_agent = object(); attraction_agent = object(); weather_agent = object(); hotel_agent = object()
             def __init__(self): self.calls = []
-            def _report_progress(self, *a, **k): pass
-            def _build_attraction_query(self, r): return "q"
-            def _run_agent_safely(self, a, q, label): return ("资料", None)
-            def _query_transportation_context(self, r): return (("交通", 0, None), None)
-            def _build_planner_query(self, r, *a): return "BASE"
-            def _run_agent_fresh(self, agent, query):
+            def report_progress(self, *a, **k): pass
+            def build_attraction_query(self, r): return "q"
+            def run_agent_safely(self, a, q, label): return ("资料", None)
+            def query_transportation_context(self, r): return (("交通", 0, None), None)
+            def build_planner_query(self, r, *a): return "BASE"
+            def run_agent_fresh(self, agent, query):
                 self.calls.append(query)
                 return skeleton_payload  # 骨架 JSON
-            def _parse_response(self, resp, r): raise AssertionError("不应走旧路径")
-            def _needs_repair(self, p, r): return False
-            def _plan_score(self, p, r): return 1
-            def _repair_plan(self, r, resp): return _simple_plan()
-            def _create_fallback_plan(self, r, reason=""):
+            def parse_response(self, resp, r): raise AssertionError("不应走旧路径")
+            def needs_repair(self, p, r): return False
+            def plan_score(self, p, r): return 1
+            def repair_plan(self, r, resp): return _simple_plan()
+            def create_fallback_plan(self, r, reason=""):
                 p = _simple_plan(); p.is_fallback = True; return p
-            def _friendly_error(self, e): return str(e)
+            def friendly_error(self, e): return str(e)
 
         request = _request(days=2).model_copy(update={
             "candidate_places": [
@@ -280,7 +281,7 @@ class SkeletonTokenBudgetTests(unittest.TestCase):
         planner = mock.Mock()
         planner.planner_agent.llm.max_tokens = 8192
         planner.planner_agent.llm.invoke.return_value = '{}'
-        planner._needs_repair.return_value = False
+        planner.needs_repair.return_value = False
         with mock.patch.object(get_settings(), 'skeleton_direct_enabled', True), \
              mock.patch.object(pg, '_get_planner', return_value=planner), \
              mock.patch.object(pg, 'parse_skeleton', return_value=([], 'ok')), \

@@ -126,11 +126,11 @@ def build_day_capacities(
         day_start, day_end = _DAY_START_MIN, _DAY_END_MIN
         note_parts: list[str] = []
 
-        if index == 0 and request.origin_city:
+        if index == 0 and request.origin_city and not request.destination_only:
             # 首日跨城抵达：窗口从抵达+接驳开始
             day_start = max(day_start, arrival + _ARRIVAL_TRANSFER_MIN)
             note_parts.append(f"首日 {arrival // 60:02d}:{arrival % 60:02d} 抵达后开始游览")
-        if index == request.travel_days - 1 and request.trip_type == "round_trip":
+        if index == request.travel_days - 1 and request.trip_type == "round_trip" and not request.destination_only:
             # 末日返程：活动须在离场缓冲前结束
             day_end = min(day_end, return_dep - _RETURN_LEAVE_BUFFER_MIN)
             note_parts.append(f"末日 {return_dep // 60:02d}:{return_dep % 60:02d} 返程，需提前离场")
@@ -176,7 +176,7 @@ _SKELETON_PROMPT = """你是行程编排师。请根据"每日容量表"把候�
 
 分配规则：
 - 每天必须安排至少 3 个景区或游玩打卡点，并严格落在容量表的 place_count 区间；
-- 首日先完成跨城交通和抵达接驳，再选择同片区、短时长的地点，不得假设早晨已经在目的地；
+{arrival_rule}
 - 同一天的地点尽量地理位置相近（按推荐理由里的区域线索），减少市内通勤；
 - 多天行程覆盖不同类别（文化/自然/街区/美食/休闲），同一天不超过两个高度相似的博物馆或商业街；
 - 只能使用候选地点列表中的名称，不要发明新地点；
@@ -223,6 +223,8 @@ def build_skeleton_prompt(
         for c in capacities
     ]
     return _SKELETON_PROMPT.format(
+        arrival_rule=('- 全程仅规划目的地内游玩，首末日按当地完整游玩日安排，不编排往返车票、机场车站接驳或跨城时段；' if request.destination_only
+                      else '- 首日先完成跨城交通和抵达接驳，再选择同片区、短时长的地点，不得假设早晨已经在目的地；'),
         city=request.city,
         days=request.travel_days,
         start_date=request.start_date,

@@ -7,7 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, model_validator
 
 CacheKind = Literal['poi', 'poi_detail', 'around', 'walking_route', 'transit_route',
-                    'driving_route', 'weather', 'opening_hours', 'official_policy']
+                    'driving_route', 'weather', 'opening_hours', 'official_policy', 'attraction_image']
 
 
 @dataclass(frozen=True)
@@ -19,6 +19,8 @@ class CachePolicy:
 
 
 POLICIES: dict[str, CachePolicy] = {
+    # 图片结果同样有过期时间；网络失败不写入负缓存。
+    'attraction_image': CachePolicy(30 * 86400, 30 * 86400),
     'poi': CachePolicy(86400, 604800, True),
     'poi_detail': CachePolicy(86400, 604800, True),
     'around': CachePolicy(86400, 604800, True),

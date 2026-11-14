@@ -3,30 +3,25 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import re
 from difflib import SequenceMatcher
-from functools import lru_cache
 from typing import Any, Optional
 
 import aiohttp
 import requests
 
-# Redis 图片结果缓存 TTL：图片内容基本不变，30 天足够长
-_IMAGE_CACHE_TTL = 30 * 24 * 3600
+from ..infrastructure.shared_cache import make_key, shared_cache
+from .cache_policy import make_entry
 
-
-def _image_cache_key(name: str, city: str) -> str:
-    return "attrimg:" + hashlib.md5(f"{name}|{city}".encode("utf-8")).hexdigest()
+def _image_cache_key(name: str, city: str):
+    return make_key("attraction_image", {"name": name.strip(), "city": city.strip()})
 
 
 def _image_cache_read(name: str, city: str) -> Optional[dict[str, Any]]:
     try:
-        from ..infrastructure import redis_client
-        raw = redis_client.cache_get(_image_cache_key(name, city))
-        if raw:
-            return json.loads(raw)
+        cached = shared_cache.read(_image_cache_key(name, city))
+        if cached.hit:
+            return cached.entry.data
     except Exception:
         pass
     return None
@@ -37,11 +32,9 @@ def _image_cache_write(name: str, city: str, result: Optional[dict[str, Any]]) -
     if not result or not result.get("photo_url"):
         return
     try:
-        from ..infrastructure import redis_client
-        redis_client.cache_set(
+        shared_cache.write(
             _image_cache_key(name, city),
-            json.dumps(result, ensure_ascii=False),
-            _IMAGE_CACHE_TTL,
+            make_entry("attraction_image", result, "attraction_image_sources"),
         )
     except Exception:
         pass
@@ -69,13 +62,12 @@ class AttractionImageService:
         # 一旦探测失败就置位，后续请求直接跳过，避免每个景点都白等8秒超时。
         self._cross_border_sources_disabled = False
 
-    @lru_cache(maxsize=512)
     def get_attraction_image(self, name: str, city: str = "") -> Optional[dict[str, Any]]:
-        """同步接口：内存 lru → Redis 缓存 → 图源链（高德→维基/Unsplash）→ 回写 Redis"""
+        """统一缓存负责内存/Redis 的期限，失败结果不在进程内永久保留。"""
         clean_name = name.strip()
         if not clean_name:
             return None
-        # 二级缓存：Redis 命中则跳过全部图源请求（lru 已在上面兜过一次）
+        # 缓存命中跳过图源请求；缓存关闭或故障时直接查询。
         cached = _image_cache_read(clean_name, city)
         if cached:
             return cached

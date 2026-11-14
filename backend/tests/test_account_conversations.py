@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from app.api.auth import AuthMiddleware
 from app.api.routes import auth, conversations, library, planner_chat
 from app.services.auth_service import auth_service
+from app.infrastructure.database import application_database
 from app.services import conversation_store, advisory_refresh_service as refresh
 from app.services.trip_store_service import TripStoreService
 from app.models.schemas import SavedTripCreate, TripPlan
@@ -18,7 +19,7 @@ class AccountConversationTests(TestCase):
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         path = Path(self.temp.name) / 'integration.db'
-        patcher = mock.patch.object(auth_service, 'database_path', path)
+        patcher = mock.patch.object(application_database, 'path', path)
         patcher.start(); self.addCleanup(patcher.stop)
         self.store = TripStoreService(path)
         auth_service.initialize(); conversation_store.initialize(); refresh.initialize()

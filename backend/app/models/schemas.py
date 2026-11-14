@@ -26,7 +26,8 @@ def get_app_today():
 
 class TripRequest(BaseModel):
     """旅行规划请求"""
-    origin_city: str = Field(..., min_length=1, max_length=50, description="出发城市", example="上海")
+    origin_city: str = Field(default='', max_length=50, description="旧版跨城模式出发城市")
+    destination_only: bool = True
     city: str = Field(..., min_length=1, max_length=50, description="目的地城市", example="北京")
     start_date: str = Field(..., description="开始日期 YYYY-MM-DD", example="2025-06-01")
     end_date: str = Field(..., description="结束日期 YYYY-MM-DD", example="2025-06-03")
@@ -89,11 +90,22 @@ class TripRequest(BaseModel):
 
     @field_validator("origin_city", "city")
     @classmethod
-    def strip_city(cls, value: str) -> str:
+    def strip_city(cls, value: str, info: ValidationInfo) -> str:
         value = value.strip()
-        if not value:
+        if not value and info.field_name == 'city':
             raise ValueError("城市不能为空")
         return value
+
+    @model_validator(mode='before')
+    @classmethod
+    def normalize_destination_only(cls, data):
+        if isinstance(data, dict) and data.get('destination_only', True) is True:
+            data = dict(data)
+            data.update(origin_city='', trip_type='one_way', departure_time=None, arrival_time=None,
+                        return_departure_time=None, return_arrival_time=None)
+            if data.get('transportation') not in ('自驾', '公共交通'):
+                data['transportation'] = '公共交通'
+        return data
 
     @model_validator(mode="after")
     @classmethod

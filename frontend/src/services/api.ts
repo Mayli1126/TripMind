@@ -19,7 +19,8 @@ import type {
 } from '@/types'
 import type { PlannerChatMessage, PlannerChatResponse } from '@/types'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+// 未配置时使用同源 /api；本地开发由 Vite 代理，部署由 Nginx 代理。
+export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,

@@ -17,6 +17,8 @@ from ...services.trip_store_service import trip_store_service
 from ...models.trip_assistant import AssistantRequest, AssistantResponse, AssistantRevisionRequest
 from ...models.schemas import PlanningJobResponse
 from ...services.trip_assistant_service import answer_trip
+from ...services.planning_application_service import submit_saved_revision
+from ...services.quota_service import enforce_planning_quota
 
 router = APIRouter(prefix="/library", tags=["个人行程库"])
 
@@ -85,18 +87,7 @@ def assistant_message(trip_id: str, payload: AssistantRequest, request: Request)
 
 @router.post("/trips/{trip_id}/assistant/revision-jobs", response_model=PlanningJobResponse, status_code=202)
 def assistant_revision(trip_id: str, payload: AssistantRevisionRequest, request: Request):
-    from ...services.runtime_service import require_planning_runtime
-    from ...services.planning_job_service import planning_job_service
-    from .trip import _enforce_quota
-    trip = _assistant_trip(trip_id, payload.base_version)
-    from ...services.job_submission_service import submit_once
-    def create(job_id):
-        require_planning_runtime(); _enforce_quota(request)
-        from ...services.conversation_store import memory_context
-        trip.request.memory_context=memory_context(current_user(request)['id'],trip.city)
-        return planning_job_service.create_revision(trip.request,trip.plan,payload.instruction,
-                                                   base_version=trip.current_version,job_id=job_id)
-    return submit_once(request,'assistant_revision',{'trip_id':trip_id,**payload.model_dump(mode='json')},create)
+    return submit_saved_revision(request, trip_id, payload, _assistant_trip)
 
 
 @router.post("/trips/{trip_id}/versions/{version}/restore", response_model=SavedTripDetail)
@@ -116,8 +107,7 @@ def refresh_advisories(trip_id: str, request: Request):
         trip = trip_store_service.get_trip(trip_id)
     except KeyError as exc:
         raise HTTPException(404, '行程不存在') from exc
-    from .trip import _enforce_quota
-    _enforce_quota(request)
+    enforce_planning_quota(current_user(request)["id"])
     result = refresh_trip(trip)
     return {**result, 'trip': trip_store_service.get_trip(trip_id)}
 

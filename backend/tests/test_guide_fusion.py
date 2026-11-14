@@ -466,6 +466,44 @@ class GuideStoreAndApiTestCase(TestCase):
             self.store.save_result(record.id, GuideParseResult(source_id=record.id, parse_status='parsed'))
         self.assertIsNone(self.store.get_record(record.id))
 
+    def test_parse_lease_excludes_other_instance_and_rejects_stale_owner(self):
+        second = GuideStoreService(self.store.database_path)
+        record = self.store.create_record(GuideInput(input_type='text', content='参观故宫'))
+        token = self.store.begin_parse(record.id)
+        with self.assertRaises(ValueError):
+            second.begin_parse(record.id)
+        with self.store._connection() as db:
+            db.execute('UPDATE guide_parse_leases SET expires_at=0 WHERE source_id=?', (record.id,))
+        replacement = second.begin_parse(record.id)
+        result = GuideParseResult(source_id=record.id, parse_status='parsed')
+        with self.assertRaises(ValueError):
+            self.store.save_result(record.id, result, parse_token=token)
+        self.assertEqual(second.save_result(record.id, result, parse_token=replacement).parse_status, 'parsed')
+
+    def test_parse_commit_keeps_choices_changed_during_provider_call(self):
+        record = self.store.create_record(GuideInput(input_type='text', content='参观故宫'))
+        result = GuideParseResult(source_id=record.id, parse_status='parsed',
+                                 candidates=[_candidate('故宫', poi_id='same-poi')])
+        self.store.save_result(record.id, result)
+        token = self.store.begin_parse(record.id)
+        second = GuideStoreService(self.store.database_path)
+        second.update_candidate_choices(record.id, {'tmp-故宫': 'excluded'})
+        result.candidates[0].candidate_id = 'new-parser-id'
+        saved = self.store.save_result(record.id, result, parse_token=token)
+        self.assertEqual(saved.result.candidates[0].user_choice, 'excluded')
+        # Provider failure must not erase a previously successful result.
+        token = self.store.begin_parse(record.id)
+        saved = self.store.save_result(record.id, GuideParseResult(source_id=record.id, parse_status='failed'), parse_token=token)
+        self.assertEqual(saved.result.candidates[0].user_choice, 'excluded')
+        self.assertEqual(saved.parse_status, 'parsed')
+
+    def test_parse_deleted_during_provider_not_resurrected(self):
+        record = self.store.create_record(GuideInput(input_type='text', content='参观故宫'))
+        token = self.store.begin_parse(record.id)
+        self.store.delete_record(record.id)
+        with self.assertRaises(KeyError):
+            self.store.save_result(record.id, GuideParseResult(source_id=record.id, parse_status='parsed'), parse_token=token)
+
     def test_store_roundtrip_and_facts(self):
         source = GuideInput(input_type="text", content="第一天去故宫，需预约", title="北京攻略", city="北京")
         record = self.store.create_record(source)

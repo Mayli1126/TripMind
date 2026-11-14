@@ -12,12 +12,14 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from contextlib import contextmanager
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Optional
 from uuid import uuid4
+
+from ..infrastructure.database import DEFAULT_DATABASE_PATH, connect, transaction
 
 from ..models.guide import GuideInput, GuideParseResult, GuideSourceRecord
 
@@ -32,34 +34,22 @@ class GuideStoreService:
     """攻略来源本地持久化：无外部数据库依赖。"""
 
     def __init__(self, database_path: str | Path | None = None) -> None:
-        default_path = Path(__file__).resolve().parents[2] / "data" / "tripmind.db"
-        self.database_path = Path(database_path or default_path)
+        self.database_path = Path(database_path or DEFAULT_DATABASE_PATH)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        # 事实表外键级联依赖此开关（与 trip_store_service 一致）
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        return connect(self.database_path)
 
-    @contextmanager
     def _connection(self):
-        """提交或回滚事务，并确保 SQLite 文件句柄及时释放。"""
-        connection = self._connect()
-        try:
-            yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        """保留攻略事务边界，连接参数与行程、认证存储保持一致。"""
+        return transaction(self._connect())
 
     def _initialize(self) -> None:
         with self._connection() as connection:
+            connection.execute('''CREATE TABLE IF NOT EXISTS guide_parse_leases (
+                source_id TEXT PRIMARY KEY, token TEXT NOT NULL, expires_at REAL NOT NULL)''')
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS guide_sources (
@@ -115,9 +105,50 @@ class GuideStoreService:
                                    (record.id, owner_id, int(datetime.now(timezone.utc).timestamp())))
         return record
 
-    def save_result(self, source_id: str, result: GuideParseResult) -> GuideSourceRecord:
+    def begin_parse(self, source_id: str, expected_status: str | None = None) -> str:
+        """Reserve one parser per source across processes; no DB lock during provider calls."""
+        token = uuid4().hex
+        with self._connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            source = db.execute('SELECT parse_status FROM guide_sources WHERE id=?', (source_id,)).fetchone()
+            if not source:
+                raise KeyError(source_id)
+            if expected_status is not None and source['parse_status'] != expected_status:
+                raise ValueError('攻略状态已更新，请刷新后再决定是否重试')
+            old = db.execute('SELECT expires_at FROM guide_parse_leases WHERE source_id=?', (source_id,)).fetchone()
+            if old and old['expires_at'] > time.time():
+                raise ValueError('这篇攻略正在解析，请等待完成后重试')
+            db.execute('INSERT OR REPLACE INTO guide_parse_leases VALUES (?,?,?)', (source_id, token, time.time()+900))
+        return token
+
+    def save_result(self, source_id: str, result: GuideParseResult, parse_token: str | None = None) -> GuideSourceRecord:
         """回填解析结果；成功时同步写入 guide_facts（先清旧事实保证幂等）。"""
         with self._lock, self._connection() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            previous = connection.execute('SELECT * FROM guide_sources WHERE id=?', (source_id,)).fetchone()
+            if previous is None:
+                raise KeyError(source_id)
+            lease = connection.execute('SELECT * FROM guide_parse_leases WHERE source_id=?', (source_id,)).fetchone()
+            if parse_token is not None and (not lease or lease['token'] != parse_token or lease['expires_at'] <= time.time()):
+                raise ValueError('解析已过期或被新任务接管，本次结果未覆盖现有攻略')
+            if parse_token is None and lease:
+                raise ValueError('已有解析任务，回填必须携带任务标识')
+            result = result.model_copy(deep=True)
+            # Keep the latest user choices, not the snapshot taken before a slow LLM call.
+            old_record = self._record_from_row(previous)
+            if old_record.result and result.parse_status != 'parsed':
+                result = old_record.result.model_copy(deep=True)
+                result.error_message = '重新解析未成功，已保留原解析结果和你的选择'
+            if old_record.result and result.parse_status == 'parsed':
+                by_poi = {c.poi_id: c.user_choice for c in old_record.result.candidates if c.poi_id}
+                by_id = {c.candidate_id: c for c in old_record.result.candidates}
+                for c in result.candidates:
+                    if c.poi_id and c.poi_id in by_poi:
+                        c.user_choice = by_poi[c.poi_id]
+                    elif c.candidate_id in by_id:
+                        old = by_id[c.candidate_id]
+                        if not (old.poi_id and c.poi_id and old.poi_id != c.poi_id):
+                            c.user_choice = old.user_choice
             cursor = connection.execute(
                 """UPDATE guide_sources
                    SET parse_status=?, error_message=?, title=?, result_json=?
@@ -138,6 +169,8 @@ class GuideStoreService:
                          fact.subject, json.dumps({"claim": fact.claim}, ensure_ascii=False),
                          fact.confidence),
                     )
+            if parse_token is not None:
+                connection.execute('DELETE FROM guide_parse_leases WHERE source_id=? AND token=?', (source_id, parse_token))
         return self.get_record(source_id)  # type: ignore[return-value]
 
     def get_record(self, source_id: str) -> Optional[GuideSourceRecord]:
@@ -176,6 +209,7 @@ class GuideStoreService:
     def delete_record(self, source_id: str) -> bool:
         """删除攻略记录；事实显式删除（不依赖外键级联，幂等保险）。"""
         with self._lock, self._connection() as connection:
+            connection.execute('DELETE FROM guide_parse_leases WHERE source_id=?', (source_id,))
             connection.execute("DELETE FROM guide_facts WHERE source_id=?", (source_id,))
             cursor = connection.execute("DELETE FROM guide_sources WHERE id=?", (source_id,))
         return cursor.rowcount > 0

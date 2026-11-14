@@ -3,7 +3,7 @@ import hashlib
 import json
 import time
 from fastapi import HTTPException
-from .auth_service import auth_service
+from ..infrastructure.database import application_database
 
 SECTIONS = ('confirmed', 'rejected', 'open_questions')
 
@@ -18,7 +18,7 @@ def _hash(messages):
 
 
 def read_summary(user_id, conversation_id):
-    with auth_service.connection() as db:
+    with application_database.connection() as db:
         row = db.execute('SELECT s.* FROM conversation_summaries s JOIN conversations c ON c.id=s.conversation_id '
                          'WHERE s.conversation_id=? AND s.user_id=? AND c.user_id=?',
                          (conversation_id, user_id, user_id)).fetchone()
@@ -46,7 +46,7 @@ def _validated(data, evidence):
 def summary_for(user_id, conversation_id, kind, trip_id=None):
     if not conversation_id:
         return '', None
-    with auth_service.connection() as db:
+    with application_database.connection() as db:
         row = db.execute('SELECT * FROM conversations WHERE id=? AND user_id=?', (conversation_id, user_id)).fetchone()
         if not row or row['kind'] != kind or row['trip_id'] != trip_id:
             raise HTTPException(404, '会话不存在或与当前行程不匹配')
@@ -96,7 +96,7 @@ def summary_for(user_id, conversation_id, kind, trip_id=None):
                 result[s] = result[s][-6:]
             result['method'] = 'extractive'
         count += len(chunk)
-        with auth_service.connection() as db:
+        with application_database.connection() as db:
             # Do not resurrect a deleted/edited conversation or overwrite a newer summary.
             fresh = db.execute('SELECT revision FROM conversations WHERE id=? AND user_id=?', (conversation_id, user_id)).fetchone()
             if fresh and fresh['revision'] == row['revision']:

@@ -60,9 +60,7 @@ class TripQualityService:
         # 交通方式差异化
         plan = transportation_mode_service.optimize_daily_transport(plan)
         
-        from .road_route_service import RoadRouteResolver
-        resolver = RoadRouteResolver(plan.city, preference="自驾" if request.transportation == "自驾" else "") if resolve_routes else None
-        plan = itinerary_schedule_service.build(plan, route_resolver=resolver)
+        plan = self.rebuild_schedule(plan, request, resolve_routes=resolve_routes)
         if resolve_routes:
             live_count = sum(item.route_leg is not None and not item.route_leg.is_estimated
                              for day in plan.days for item in day.schedule)
@@ -100,13 +98,35 @@ class TripQualityService:
         plan.data_quality = "fallback" if plan.is_fallback else "mixed"
         return plan
 
+    def rebuild_schedule(
+        self, plan: TripPlan, request: TripRequest, *,
+        resolve_routes: bool = False, day_indexes: set[int] | None = None,
+    ) -> TripPlan:
+        """统一道路耗时与时间线入口；指定日期时不改动其他天。"""
+        from .road_route_service import RoadRouteResolver
+
+        resolver = (
+            RoadRouteResolver(plan.city, preference="自驾" if request.transportation == "自驾" else "")
+            if resolve_routes else None
+        )
+        return itinerary_schedule_service.build(plan, route_resolver=resolver, day_indexes=day_indexes)
+
+    def finalize_revision(
+        self, plan: TripPlan, request: TripRequest, *,
+        changed_days: set[int] | None = None, intercity_cost_per_person: int = 0,
+    ) -> TripPlan:
+        """增量收尾只重建受影响日和预算，不重复全局景点重排。"""
+        plan = self.rebuild_schedule(plan, request, resolve_routes=True, day_indexes=changed_days or None)
+        plan.budget = self.calculate_budget(plan, request, intercity_cost_per_person)
+        return plan
+
     @staticmethod
     def _build_intercity_journey(
         request: TripRequest,
         option: TransportationOption | None,
         existing: IntercityJourney | None,
     ) -> IntercityJourney | None:
-        if request.origin_city.strip() == request.city.strip():
+        if request.destination_only or request.origin_city.strip() == request.city.strip():
             return None
         if not (request.departure_time and request.arrival_time) and option is None:
             if existing and existing.source in {"user_confirmed", "live", "static"}:
@@ -163,7 +183,7 @@ class TripQualityService:
         outbound_option: TransportationOption | None,
         existing: IntercityJourney | None,
     ) -> IntercityJourney | None:
-        if request.trip_type == "one_way" or request.origin_city.strip() == request.city.strip():
+        if request.destination_only or request.trip_type == "one_way" or request.origin_city.strip() == request.city.strip():
             return None
         if not (request.return_departure_time and request.return_arrival_time):
             return existing if existing and existing.source == "user_confirmed" else None
@@ -216,6 +236,8 @@ class TripQualityService:
 
     @staticmethod
     def _transport_warnings(plan: TripPlan, request: TripRequest) -> list[str]:
+        if request.destination_only:
+            return []
         warnings = []
         if request.origin_city != request.city and not plan.intercity_journey:
             warnings.append("未获得可信的去程班次，首日未自动占用跨城交通时间；请填写已购票时刻后重新规划。")
@@ -467,7 +489,7 @@ class TripQualityService:
         ))
 
         journey_count = 2 if request.trip_type == "round_trip" else 1
-        intercity_cost = (
+        intercity_cost = 0 if request.destination_only else (
             max(intercity_cost_per_person, 0) * request.travelers * journey_count
         )
         local_cost = (
@@ -515,8 +537,9 @@ class TripQualityService:
                 f"景点价格未知 {sum(a.ticket_price is None and a.amap_average_cost is None for d in plan.days for a in d.attractions)} 处未计入总额；总额不是完整报价；"
                 + ("市内按实际排程逐段汇总，公交按人数、驾车按每4人一车；未定位车站接驳按15元/人/段预留（机场实际费用可能远高于此），餐厅绕行未计；" if routed else
                    f"市内交通按每人每天¥{self.LOCAL_TRANSPORT_PER_PERSON_PER_DAY}估算；")
-                + "景点/住宿优先按高德人均消费×人数计算，住宿另乘晚数；这不是门票或房价。缺失时使用已标注的静态参考/AI估价/房间预算；AI房费按间数乘晚数，未知部分未计入。AI价格依赖已有知识，未核验实时价格；餐饮及跨城票价也非实时报价。跨城交通按"
-                f"{'往返' if request.trip_type == 'round_trip' else '单程'}参考价计算。"
+                + "景点/住宿优先按高德人均消费×人数计算，住宿另乘晚数；这不是门票或房价。缺失时使用已标注的静态参考/AI估价/房间预算；AI房费按间数乘晚数，未知部分未计入。AI价格依赖已有知识，未核验实时价格。"
+                + ('仅含目的地内费用，不查询或计入往返目的地的车票。' if request.destination_only
+                   else f"跨城交通按{'往返' if request.trip_type == 'round_trip' else '单程'}参考价计算。")
             ),
         )
 

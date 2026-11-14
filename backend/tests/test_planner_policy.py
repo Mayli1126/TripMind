@@ -34,19 +34,19 @@ class PlannerPolicyTests(TestCase):
             )],
             overall_suggestions="测试",
         )
-        self.assertTrue(self.planner._needs_repair(plan, self.request))
+        self.assertTrue(self.planner.needs_repair(plan, self.request))
 
     def test_fallback_plan_scores_lower(self):
-        fallback = self.planner._create_fallback_plan(self.request)
+        fallback = self.planner.create_fallback_plan(self.request)
         normal = fallback.model_copy(deep=True)
         normal.is_fallback = False
         self.assertGreater(
-            self.planner._plan_score(normal, self.request),
-            self.planner._plan_score(fallback, self.request),
+            self.planner.plan_score(normal, self.request),
+            self.planner.plan_score(fallback, self.request),
         )
 
     def test_truncated_response_reports_specific_fallback_reason(self):
-        plan = self.planner._parse_response('{"city":"北京","days":[', self.request)
+        plan = self.planner.parse_response('{"city":"北京","days":[', self.request)
         self.assertTrue(plan.is_fallback)
         self.assertTrue(any("长度限制截断" in item for item in plan.warnings))
 
@@ -55,7 +55,7 @@ class PlannerPolicyTests(TestCase):
             def run(self, _query):
                 raise TimeoutError("request timed out with secret headers")
 
-        response, warning = self.planner._run_agent_safely(FailedAgent(), "query", "天气查询")
+        response, warning = self.planner.run_agent_safely(FailedAgent(), "query", "天气查询")
         self.assertIn("暂不可用", response)
         self.assertEqual(warning, "天气查询未完成：服务请求超时。")
 
@@ -65,6 +65,6 @@ class PlannerPolicyTests(TestCase):
             "end_date": (date.today() + timedelta(days=34)).isoformat(),
             "travel_days": 5,
         })
-        plan = self.planner._create_fallback_plan(request)
+        plan = self.planner.create_fallback_plan(request)
         names = [item.name for day in plan.days for item in day.attractions]
         self.assertEqual(len(names), len(set(names)))

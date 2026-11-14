@@ -37,7 +37,7 @@ async def get_poi_detail(poi_id: str):
         amap_service = get_amap_service()
         
         # 调用高德地图POI详情API
-        result = amap_service.get_poi_detail(poi_id)
+        result = await run_in_threadpool(amap_service.get_poi_detail, poi_id)
         
         return POIDetailResponse(
             success=True,
@@ -55,6 +55,7 @@ async def get_poi_detail(poi_id: str):
 
 @router.get(
     "/search",
+    deprecated=True,
     summary="搜索POI",
     description="根据关键词搜索POI"
 )
@@ -71,7 +72,7 @@ async def search_poi(keywords: str, city: str = "北京"):
     """
     try:
         amap_service = get_amap_service()
-        result = amap_service.search_poi(keywords, city)
+        result = await run_in_threadpool(amap_service.search_poi, keywords, city)
 
         return {
             "success": True,

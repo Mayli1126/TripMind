@@ -33,6 +33,7 @@ def _request() -> TripRequest:
     start = (date.today() + timedelta(days=30)).isoformat()
     end = (date.today() + timedelta(days=31)).isoformat()
     return TripRequest(
+        destination_only=False,  # Legacy cross-city fixture.
         origin_city="上海",
         city="北京",
         start_date=start,
@@ -179,10 +180,10 @@ class _ParseFailedPlanner:
 
     planner_agent = object()
 
-    def _report_progress(self, callback, *args, **kwargs):
+    def report_progress(self, callback, *args, **kwargs):
         pass
 
-    def _friendly_error(self, exc):
+    def friendly_error(self, exc):
         return str(exc)
 
     def revise_trip(self, request, current_plan, instruction, progress_callback=None):

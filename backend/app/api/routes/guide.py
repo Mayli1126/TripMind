@@ -52,6 +52,12 @@ def _enforce_guide_quota(request: Request) -> None:
 def _parse_and_save(record: GuideSourceRecord, source: GuideInput) -> GuideSourceRecord:
     """执行解析并把结果回填存储；任何异常都转为 failed 结果而非 500。"""
     try:
+        parse_token = guide_store_service.begin_parse(record.id, expected_status=record.parse_status)
+    except KeyError:
+        raise HTTPException(404, '攻略已删除') from None
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    try:
         pool, results = run_guide_fusion(
             [source],
             city_hint=source.city,
@@ -67,9 +73,11 @@ def _parse_and_save(record: GuideSourceRecord, source: GuideInput) -> GuideSourc
             error_hint="请稍后重试，或改用粘贴正文方式导入",
         )
     try:
-        return guide_store_service.save_result(record.id, result) or record
+        return guide_store_service.save_result(record.id, result, parse_token=parse_token) or record
     except KeyError:
         raise HTTPException(404, '攻略已删除，解析结果未重新保存') from None
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 @router.post("", response_model=GuideSourceRecord, status_code=201)

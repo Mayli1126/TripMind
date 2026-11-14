@@ -1,0 +1,87 @@
+name: tripmind-local
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-backend: &backend
+  image: tripmind-backend:local
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
+  env_file:
+    - ${TRIPMIND_ENV_FILE:-.env.docker}
+  environment:
+    REDIS_ENABLED: "true"
+    REDIS_URL: redis://redis:6379/0
+    CACHE_ENABLED: "false"
+    UV_CACHE_DIR: /opt/uv-cache
+    HOST: 0.0.0.0
+    PORT: "8000"
+  volumes:
+    - app-data:/app/backend/data
+    - mcp-cache:/opt/uv-cache
+  init: true
+  logging: *logging
+
+services:
+  redis:
+    logging: *logging
+    image: redis/redis-stack-server:7.4.0-v3
+    environment:
+      REDIS_ARGS: "--appendonly yes --appendfsync everysec --maxmemory-policy noeviction"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  backend:
+    <<: *backend
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
+      start_period: 180s
+      interval: 15s
+      timeout: 6s
+      retries: 4
+    stop_grace_period: 45s
+    restart: unless-stopped
+
+  frontend:
+    logging: *logging
+    image: tripmind-frontend:local
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_AMAP_WEB_JS_KEY: ${VITE_AMAP_WEB_JS_KEY:-}
+    ports:
+      - "${TRIPMIND_BIND_IP:-127.0.0.1}:${TRIPMIND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  mcp-prepare:
+    <<: *backend
+    profiles: ["tools"]
+    command: ["python", "-m", "app.services.mcp_setup", "prepare"]
+    restart: "no"
+
+volumes:
+  app-data:
+  redis-data:
+  mcp-cache:

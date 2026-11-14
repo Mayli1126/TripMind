@@ -27,7 +27,6 @@ from ..agents.trip_planner_agent import MultiAgentTripPlanner, get_trip_planner_
 from ..infrastructure.llm_client import LLMClient
 from ..models.patch import PlanPatch
 from ..models.schemas import RevisionChange, TripPlan, TripRequest
-from ..services.itinerary_schedule_service import itinerary_schedule_service
 from ..services.patch_service import apply_plan_patch, ensure_stable_ids
 from ..services.trip_quality_service import trip_quality_service
 from .state import PlanningState
@@ -174,7 +173,7 @@ def parse_patch_node(state: PlanningState, config: RunnableConfig) -> dict:
     plan: TripPlan = state["plan"]
     instruction: str = state.get("revision_instruction", "")
 
-    planner._report_progress(callback, 15, "understanding", "正在理解修改要求")
+    planner.report_progress(callback, 15, "understanding", "正在理解修改要求")
     prompt = _PARSE_PROMPT.format(instruction=instruction, plan_skeleton=_plan_skeleton(plan))
     try:
         # Patch 解析是纯文本翻译（无工具调用），直接走快速模型客户端
@@ -188,7 +187,7 @@ def parse_patch_node(state: PlanningState, config: RunnableConfig) -> dict:
     except Exception as exc:
         return {"patch_error": f"parse_failed: {exc}"}
 
-    planner._report_progress(
+    planner.report_progress(
         callback, 40, "patch_parsed", f"修改指令已解析：{patch.explanation}"
     )
     return {"plan_patch": patch, "patch_error": None}
@@ -243,7 +242,7 @@ def apply_patch_node(state: PlanningState, config: RunnableConfig) -> dict:
     # 请求携带的攻略候选：add/replace 可按 replacement_candidate_id 直取已校准地点
     candidates = getattr(state.get("request"), "candidate_places", None)
 
-    planner._report_progress(callback, 65, "patching", "正在应用修改")
+    planner.report_progress(callback, 65, "patching", "正在应用修改")
     new_plan, issues = apply_plan_patch(
         plan, patch, candidates, current_version=state.get("base_version")
     )
@@ -254,7 +253,7 @@ def apply_patch_node(state: PlanningState, config: RunnableConfig) -> dict:
         preserved.warnings.append(
             "本次修改未通过校验，已保留原计划：" + "；".join(i.message for i in errors)
         )
-        planner._report_progress(callback, 90, "rejected", "修改被校验拒绝，已保留原计划")
+        planner.report_progress(callback, 90, "rejected", "修改被校验拒绝，已保留原计划")
         # 只写 result 不写 patched_plan：路由边据此跳过 finalize_revision
         return {"result": preserved}
     new_plan.revision_diff = _build_revision_diff(patch, new_plan)
@@ -280,7 +279,6 @@ def finalize_revision_node(state: PlanningState, config: RunnableConfig) -> dict
     plan.warnings.append(f"已根据修改要求更新：{state.get('revision_instruction', '')}")
     plan.planning_iterations = (plan.planning_iterations or 0) + 1
     # 重建时间轴：确定性的按新景点集合重排（受保护日的景点集合未变，仅时间轴重算）
-    from ..services.road_route_service import RoadRouteResolver
     changed_days = set(patch.affected_day_indexes)
     original = state.get("plan")
     if isinstance(original, TripPlan):
@@ -288,13 +286,11 @@ def finalize_revision_node(state: PlanningState, config: RunnableConfig) -> dict
         for index, day in enumerate(plan.days):
             if index >= len(original.days) or day.attractions != original.days[index].attractions:
                 changed_days.add(index)
-    itinerary_schedule_service.build(plan, route_resolver=RoadRouteResolver(plan.city, preference="自驾" if request.transportation == "自驾" else ""),
-                                     day_indexes=changed_days or None)
-    plan.budget = trip_quality_service.calculate_budget(
-        plan, request, intercity_cost_per_person=intercity_cost
+    plan = trip_quality_service.finalize_revision(
+        plan, request, changed_days=changed_days, intercity_cost_per_person=intercity_cost,
     )
 
-    planner._report_progress(callback, 95, "optimizing", "预算与时间轴已重新计算")
+    planner.report_progress(callback, 95, "optimizing", "预算与时间轴已重新计算")
     return {"result": plan}
 
 
@@ -359,7 +355,7 @@ def run_revision_graph(
         if isinstance(result, TripPlan):
             return result
         # 解析失败（abort 路径）→ 回退 legacy 整份重生成
-        planner._report_progress(
+        planner.report_progress(
             progress_callback, 30, "revising", "修改范围较大，正在重新编排相关行程"
         )
         result = planner.revise_trip(request, current_plan, instruction, progress_callback)
@@ -373,5 +369,5 @@ def run_revision_graph(
     except Exception as exc:
         preserved = current_plan.model_copy(deep=True)
         preserved.revision_diff = []
-        preserved.warnings.append(f"修改失败，已保留原计划：{planner._friendly_error(exc)}")
+        preserved.warnings.append(f"修改失败，已保留原计划：{planner.friendly_error(exc)}")
         return preserved

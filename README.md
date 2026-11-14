@@ -1,5 +1,7 @@
 # TripMind 智能旅行规划助手 🌍✈️
 
+Docker 本地容器化部署见 [DOCKER.md](DOCKER.md)：Nginx 前端、FastAPI 后端与 Redis Stack，包含数据持久化和容器内地图工具准备步骤。真实配置和用户数据不要提交 Git。
+
 > **衍生项目声明**：本项目衍生自 [jjyaoao/HelloAgents](https://github.com/jjyaoao/HelloAgents) 的旅行规划助手示例，并在其基础上大幅重构——原 HelloAgents 框架已替换为 LangGraph 编排 + 原生 OpenAI SDK，新增攻略智能导入、候选地点校准、interrupt 确认交互与 PlanPatch 增量修改等能力。感谢原作者的开源分享。
 
 > 多 Agent 协作 + 攻略智能导入 + 对话式增量修改的旅行规划系统。

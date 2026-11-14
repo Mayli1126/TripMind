@@ -44,9 +44,9 @@
           <div v-if="!sending && !planning && suggestions.length" class="reply-suggestions"><button v-for="suggestion in suggestions" :key="suggestion" @click="send(suggestion)">{{ suggestion }} ↗</button></div>
           <article v-if="readyRequest && !sending && !planning" class="confirmation-card">
             <span class="eyebrow">准备好，就出发</span><h3>{{ readyRequest.city }} · {{ readyRequest.travel_days }} 天</h3>
-            <p>{{ readyRequest.origin_city }}出发，{{ readyRequest.start_date }} 至 {{ readyRequest.end_date }}</p>
+            <p>{{ readyRequest.city }}当地游玩 · {{ readyRequest.start_date }} 至 {{ readyRequest.end_date }}</p>
             <p>{{ readyRequest.travelers }} 人 · {{ readyRequest.rooms }} 间房 · {{ readyRequest.accommodation }}</p>
-            <p>{{ transportLabel(readyRequest.transportation) }} · {{ paceLabel(readyRequest.pace) }} · {{ readyRequest.trip_type === 'one_way' ? '单程' : '往返' }} · {{ readyRequest.budget_limit ? `总预算 ¥${readyRequest.budget_limit}` : '未设置预算上限' }}</p>
+            <p>{{ transportLabel(readyRequest.transportation) }} · {{ paceLabel(readyRequest.pace) }} · 不含跨城车票 · {{ readyRequest.budget_limit ? `当地预算 ¥${readyRequest.budget_limit}` : '未设置预算上限' }}</p>
             <small>没有特别指定的项目按以上默认安排；还想调整，直接告诉我。</small>
             <button class="plan-button" @click="startPlanning">✦ 就这样，开始规划 <span>→</span></button>
           </article>
@@ -63,7 +63,6 @@
             <small v-if="!waitingInput" class="progress-footnote">{{ progress >= 72 ? '正在编排、核对行程，完成后会自动打开计划。' : '在核对目的地资料，不需要重复提交。' }}</small>
             <div v-if="waitingInput" class="decision-replies"><button v-for="option in waitingInput.options" :key="option.value" :disabled="resuming" @click="chooseOption(option.value)">{{ option.label }} <span>↗</span></button><small>点击回答，或在下面输入对应选项。</small></div>
           </article>
-          <div ref="threadEnd" />
         </div>
         <form class="chat-composer" @submit.prevent="send()"><textarea v-model="input" rows="2" maxlength="3000" :disabled="sending || (planning && !waitingInput)" :placeholder="waitingInput ? '告诉我你选择哪个方案…' : planning ? '正在规划，稍后就能看到行程…' : '补充想法，或告诉我想调整什么…'" aria-label="发送旅行需求" @keydown="onComposerKey" /><div><span>Enter 发送 · Shift + Enter 换行</span><button class="send-button" type="submit" :disabled="!input.trim() || sending || (planning && !waitingInput)" aria-label="发送消息">↑</button></div></form>
       </aside>
@@ -72,7 +71,7 @@
         <div ref="mapElement" class="destination-map" />
         <div v-if="!mapReady" class="map-placeholder"><div class="map-orbit"><span>⌖</span></div><h2>{{ draft.city ? `下一站，${draft.city}` : '世界很大，下一站去哪？' }}</h2><p>{{ mapError || (draft.city ? '正在展开目的地地图' : '聊聊你的目的地，地图会在这里展开。') }}</p></div>
         <div class="map-topline"><span class="map-tag"><i />{{ draft.city || '你的下一段旅程' }}</span><button @click="fitMap" :disabled="!mapReady" class="map-tag">⌖ 回到目的地</button></div>
-        <aside class="trip-brief"><div class="brief-heading"><span>旅行灵感簿</span><small>随对话更新</small></div><h2>{{ draft.city || '还没决定，也没关系' }}<small v-if="draft.travel_days">{{ draft.travel_days }} 天</small></h2><div class="brief-route">{{ draft.origin_city || '出发地待聊聊' }} <span>⟶</span> {{ draft.city || '下一站' }}</div><div class="brief-details"><span>出发日期<strong>{{ draft.start_date || '还没定' }}</strong></span><span>同行人数<strong>{{ draft.travelers ? `${draft.travelers} 人` : '待确认 · 默认 1 人' }}</strong></span><span>旅行节奏<strong>{{ draft.pace ? paceLabel(draft.pace) : '适中（默认）' }}</strong></span><span>总预算<strong>{{ draft.budget_limit ? `¥ ${draft.budget_limit}` : '暂不限' }}</strong></span></div><div v-if="draft.preferences?.length" class="preference-tags"><span v-for="tag in draft.preferences" :key="tag">{{ tag }}</span></div><div v-if="draft.free_text_input" class="brief-notes">{{ draft.free_text_input }}</div><div v-if="candidates.length" class="candidate-notes"><strong>来自你的攻略 · {{ candidates.length }} 个地点</strong><p>{{ candidates.slice(0, 6).map(place => place.canonical_name).join(' · ') }}{{ candidates.length > 6 ? ' …' : '' }}</p></div><p class="brief-tip">想改日期、预算或玩法？<br />直接在对话里告诉我。</p></aside>
+<aside class="trip-brief"><div class="brief-heading"><span>旅行灵感簿</span><small>随对话更新</small></div><h2>{{ draft.city || '还没决定，也没关系' }}<small v-if="draft.travel_days">{{ draft.travel_days }} 天</small></h2><div class="brief-route">目的地内游玩 · {{ draft.city || '下一站待确认' }}</div><div class="brief-details"><span>出发日期<strong>{{ draft.start_date || '还没定' }}</strong></span><span>同行人数<strong>{{ draft.travelers ? `${draft.travelers} 人` : '待确认 · 默认 1 人' }}</strong></span><span>旅行节奏<strong>{{ draft.pace ? paceLabel(draft.pace) : '适中（默认）' }}</strong></span><span>总预算<strong>{{ draft.budget_limit ? `¥ ${draft.budget_limit}` : '暂不限' }}</strong></span></div><div v-if="draft.preferences?.length" class="preference-tags"><span v-for="tag in draft.preferences" :key="tag">{{ tag }}</span></div><div v-if="draft.free_text_input" class="brief-notes">{{ draft.free_text_input }}</div><div v-if="candidates.length" class="candidate-notes"><strong>来自你的攻略 · {{ candidates.length }} 个地点</strong><p>{{ candidates.slice(0, 6).map(place => place.canonical_name).join(' · ') }}{{ candidates.length > 6 ? ' …' : '' }}</p></div><p class="brief-tip">想改日期、预算或玩法？<br />直接在对话里告诉我。</p></aside>
         <span class="map-caption">聊出旅行的样子，再把它变成路线。</span>
       </div>
     </section>
@@ -122,7 +121,6 @@ const recentLoading = ref(true)
 const recentError = ref('')
 const candidates = ref<CandidatePlace[]>([])
 const thread = ref<HTMLElement>()
-const threadEnd = ref<HTMLElement>()
 const mapElement = ref<HTMLElement>()
 const mapReady = ref(false)
 const mapError = ref('')
@@ -140,7 +138,7 @@ const elapsedLabel = computed(() => elapsed.value < 60 ? `${elapsed.value} 秒` 
 const ideas = ['去威海看海，慢慢玩四天', '和朋友来一场成都美食之旅', '周末去南京，逛博物馆和老街']
 const agents = computed(() => [
   { key: 'attractions', label: '景点' }, { key: 'weather', label: '天气' },
-  { key: 'hotels', label: '住宿' }, { key: 'transportation', label: '交通' }
+  { key: 'hotels', label: '住宿' }
 ].map(agent => ({ ...agent, status: agentStates.value[agent.key]?.status || 'waiting' })))
 const phaseLabels: Record<string, string> = {
   queued: '排队等待', initializing: '准备规划服务', research: '查询旅行资料', capacity: '计算可用时间',

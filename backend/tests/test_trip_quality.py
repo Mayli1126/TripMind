@@ -20,6 +20,7 @@ def make_request(**overrides) -> TripRequest:
     start = datetime.now().date() + timedelta(days=30)
     end = start + timedelta(days=1)
     values = {
+        "destination_only": False,  # Explicit legacy cross-city contract.
         "origin_city": "上海",
         "city": "北京",
         "start_date": start.isoformat(),

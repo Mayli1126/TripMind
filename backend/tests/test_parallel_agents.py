@@ -9,6 +9,7 @@ def make_request(origin_city: str = "武汉") -> TripRequest:
     from datetime import date, timedelta
     start = date.today() + timedelta(days=30)
     return TripRequest(
+        destination_only=False,  # Legacy four-branch fan-out coverage.
         origin_city=origin_city,
         city="宜昌",
         start_date=start.isoformat(),
@@ -52,7 +53,7 @@ class ParallelAgentTests(unittest.TestCase):
             barrier.wait(timeout=1)
             return ("transport-result", 88), None
 
-        planner._query_transportation_context = transport
+        planner.query_transportation_context = transport
         events = []
         result = planner._collect_parallel_context(
             make_request(), lambda *event: events.append(event)
@@ -75,7 +76,7 @@ class ParallelAgentTests(unittest.TestCase):
         planner.attraction_agent = StaticAgent("attraction-result")
         planner.weather_agent = StaticAgent(error=TimeoutError("timed out"))
         planner.hotel_agent = StaticAgent("hotel-result")
-        planner._query_transportation_context = lambda _request: (("transport-result", 88), None)
+        planner.query_transportation_context = lambda _request: (("transport-result", 88), None)
         events = []
 
         result = planner._collect_parallel_context(

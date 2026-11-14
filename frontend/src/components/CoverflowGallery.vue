@@ -1,6 +1,8 @@
 <template>
   <div
+    ref="galleryRoot"
     class="coverflow"
+    :class="{ 'is-panorama': panoramic }"
     @pointerdown="onPointerDown"
     @pointerup="onPointerUp"
     @pointercancel="onPointerUp"
@@ -11,10 +13,16 @@
         v-for="(item, index) in items"
         :key="item.key"
         class="cover-card"
-        :class="{ 'is-active': index === current, 'is-hidden': Math.abs(index - current) > 2 }"
+        :class="{ 'is-active': index === current, 'is-hidden': panoramic ? index !== current : Math.abs(index - current) > 2 }"
         :style="cardStyle(index)"
         :data-attraction-name="item.name"
+        role="button"
+        :tabindex="index === current ? 0 : -1"
+        :aria-hidden="panoramic && index !== current ? true : undefined"
+        :aria-label="`查看${item.name}的行程`"
         @click="onCardClick(index)"
+        @keydown.enter.prevent="onCardClick(index)"
+        @keydown.space.prevent="onCardClick(index)"
       >
         <img class="cover-img" :src="item.image" :alt="item.name" loading="lazy" draggable="false" />
         <div class="cover-shade"></div>
@@ -31,12 +39,14 @@
       v-if="items.length > 1"
       class="cover-arrow cover-arrow-left"
       aria-label="上一个景点"
+      :disabled="current === 0"
       @click.stop="prev"
     >‹</button>
     <button
       v-if="items.length > 1"
       class="cover-arrow cover-arrow-right"
       aria-label="下一个景点"
+      :disabled="current === items.length - 1"
       @click.stop="next"
     >›</button>
 
@@ -57,7 +67,7 @@
 <script setup lang="ts">
 // 行程概览的 Coverflow 轮播：纯手写实现（零第三方依赖）
 // 规格：竖向 3:4 大卡，中间 1.0 / 两侧 0.82、0.68 递减，层叠纵深，300ms ease-out
-import { onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 
 export interface CoverflowItem {
   key: string | number
@@ -66,16 +76,19 @@ export interface CoverflowItem {
   description?: string
 }
 
-const props = defineProps<{ items: CoverflowItem[] }>()
+const props = defineProps<{ items: CoverflowItem[]; panoramic?: boolean }>()
 const emit = defineEmits<{ (e: 'select', index: number): void }>()
 
 const current = ref(0)
+const galleryRoot = ref<HTMLElement | null>(null)
+watch(() => props.items.length, length => { current.value = Math.min(current.value, Math.max(0, length - 1)) })
 
 // 缩放/透明度/层级按与中间卡的偏移取值；超过两格隐藏
 const SCALES = [1, 0.82, 0.68]
 const OPACITIES = [1, 0.72, 0.38]
 
 const cardStyle = (index: number) => {
+  if (props.panoramic) return { opacity: index === current.value ? '1' : '0', zIndex: index === current.value ? '1' : '0' }
   const offset = index - current.value
   const distance = Math.abs(offset)
   const scale = SCALES[Math.min(distance, SCALES.length - 1)]
@@ -101,10 +114,11 @@ const onCardClick = (index: number) => {
 
 // 键盘左右方向键切换（输入框聚焦时不响应）
 const onKeydown = (event: KeyboardEvent) => {
+  if (!galleryRoot.value?.contains(event.target as Node)) return
   const tag = (event.target as HTMLElement | null)?.tagName
   if (tag === 'INPUT' || tag === 'TEXTAREA') return
-  if (event.key === 'ArrowRight') next()
-  else if (event.key === 'ArrowLeft') prev()
+  if (event.key === 'ArrowRight') { event.preventDefault(); next() }
+  else if (event.key === 'ArrowLeft') { event.preventDefault(); prev() }
 }
 
 // 拖拽滑动：位移超过阈值（约 40px）切换一格
@@ -258,4 +272,37 @@ defineExpose({ goTo })
   .cover-arrow-left { left: 6px; }
   .cover-arrow-right { right: 6px; }
 }
+</style>
+
+<style scoped>
+/* Result-page photo journal variant. Original stacked mode stays available. */
+.is-panorama { gap: 16px; }
+.is-panorama .cover-stage { height: clamp(240px, 20vw, 300px); overflow: hidden; border-radius: 24px; background: #dce8ec; }
+.is-panorama .cover-card { inset: 0; margin: 0; width: 100%; height: 100%; border-radius: 0; transform: none; transition: opacity .24s ease; box-shadow: none; }
+.is-panorama .cover-card.is-hidden { visibility: hidden; pointer-events: none; }
+.is-panorama .cover-img { object-position: center; filter: none; }
+.is-panorama .cover-shade { height: 80%; background: linear-gradient(0deg, #142d40c9, transparent); }
+.is-panorama .cover-info { left: 72px; right: 72px; bottom: 12px; padding: 24px; }
+.is-panorama .cover-name { font-size: 28px; font-weight: 600; margin: 0 0 8px; letter-spacing: 0; }
+.is-panorama .cover-desc { max-width: 48em; font-size: 14px; line-height: 1.8; color: #fffffff0; }
+.is-panorama .cover-index { top: 20px; right: 24px; bottom: auto; left: auto; padding: 4px 12px; font-size: 12px; font-weight: 500; letter-spacing: 0; border-radius: 20px; background: #1635488c; }
+.is-panorama .cover-arrow { top: calc((clamp(240px, 20vw, 300px)) / 2); width: 44px; height: 44px; background: #fff; color: #183c50; border: 0; backdrop-filter: none; }
+.is-panorama .cover-arrow-left { left: 20px; }
+.is-panorama .cover-arrow-right { right: 20px; }
+.is-panorama .cover-arrow:disabled { opacity: .35; cursor: default; }
+.is-panorama .cover-dot { width: 24px; height: 24px; position: relative; background: transparent; transform: none; }
+.is-panorama .cover-dot::after { content: ''; position: absolute; width: 6px; height: 6px; top: 9px; left: 9px; background: #bacdd6; border-radius: 50%; }
+.is-panorama .cover-dot.is-current::after { background: #218dab; width: 20px; left: 2px; border-radius: 6px; }
+.is-panorama .cover-dots { gap: 0; flex-wrap: wrap; }
+.is-panorama button:focus-visible, .is-panorama .cover-card:focus-visible { outline: 3px solid #43bad6; outline-offset: -4px; }
+@media (max-width: 760px) {
+  .is-panorama .cover-stage { height: 240px; border-radius: 20px; }
+  .is-panorama .cover-info { left: 12px; right: 12px; bottom: 0; padding: 20px; }
+  .is-panorama .cover-name { font-size: 24px; }
+  .is-panorama .cover-desc { font-size: 14px; -webkit-line-clamp: 2; }
+  .is-panorama .cover-arrow { top: 80px; }
+  .is-panorama .cover-arrow-left { left: 12px; }
+  .is-panorama .cover-arrow-right { right: 12px; }
+}
+@media (prefers-reduced-motion: reduce) { .is-panorama .cover-card { transition: none; } }
 </style>

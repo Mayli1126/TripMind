@@ -164,7 +164,7 @@ watch([messages, pending, activeRevision], () => {
   if (hydrated.value && trip.value) void cloud.save({ messages: messages.value, pending: pending.value, activeRevision: activeRevision.value, base_version: trip.value.current_version }, `${trip.value.title} · 行程问答`, trip.value.id)
 }, { deep: true })
 watch(sourceTripId, () => { void load() }, { immediate: true })
-defineExpose({ canClose: canLeave })
+defineExpose({ canClose: canLeave, hasPending: () => busy.value || !!pending.value, refresh: load })
 onBeforeRouteLeave(canLeave)
 onBeforeRouteUpdate(canLeave)
 onBeforeUnmount(() => { generation++; cancel?.() })

@@ -27,8 +27,7 @@ class _PatchedSourcesTestCase(TestCase):
         for patcher in patchers:
             patcher.start()
         try:
-            # 清空 lru_cache，避免用例间串缓存
-            AttractionImageService.get_attraction_image.cache_clear()
+            # 读写缓存已由上方替身隔离，不访问真实缓存。
             service = AttractionImageService()
             service.unsplash_access_key = 'offline-fixture'
             return service.get_attraction_image("故宫博物院", "北京")

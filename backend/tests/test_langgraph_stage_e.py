@@ -31,6 +31,7 @@ _BUDGET_LIMIT = 1000
 def _request(accommodation: str = "豪华酒店") -> TripRequest:
     start = (date.today() + timedelta(days=30)).isoformat()
     return TripRequest(
+        destination_only=False,  # Legacy cross-city fixture.
         origin_city="上海",
         city="北京",
         start_date=start,
@@ -73,48 +74,48 @@ class StubPlanner:
     def __init__(self):
         self.generated: list[str] = []
 
-    def _report_progress(self, callback, *args, **kwargs):
+    def report_progress(self, callback, *args, **kwargs):
         pass
 
-    def _build_attraction_query(self, request):
+    def build_attraction_query(self, request):
         return "query"
 
-    def _run_agent_safely(self, agent, query, label):
+    def run_agent_safely(self, agent, query, label):
         return self.branch_results.get(label, {
             "景点检索": ("景点资料", None),
             "天气查询": ("天气资料", None),
             "酒店检索": ("酒店资料", None),
         }[label])
 
-    def _query_transportation_context(self, request):
+    def query_transportation_context(self, request):
         return (("交通资料", 100, None), None)
 
-    def _build_planner_query(self, request, *args):
+    def build_planner_query(self, request, *args):
         return "query"
 
-    def _run_agent_fresh(self, agent, query):
+    def run_agent_fresh(self, agent, query):
         return "response"
 
-    def _parse_response(self, response, request):
+    def parse_response(self, response, request):
         self.generated.append(request.accommodation)
         return _plan(over_budget=request.accommodation not in ("经济型酒店", "民宿"))
 
-    def _needs_repair(self, plan, request):
+    def needs_repair(self, plan, request):
         return False
 
-    def _plan_score(self, plan, request):
+    def plan_score(self, plan, request):
         return 1
 
-    def _repair_plan(self, request, response):
+    def repair_plan(self, request, response):
         return _plan(over_budget=False)
 
-    def _create_fallback_plan(self, request, reason=""):
+    def create_fallback_plan(self, request, reason=""):
         plan = _plan(over_budget=False)
         plan.is_fallback = True
         plan.warnings.append(reason)
         return plan
 
-    def _friendly_error(self, exc):
+    def friendly_error(self, exc):
         return str(exc)
 
 
@@ -272,7 +273,7 @@ class _RecordingRequestPlanner(StubPlanner):
         super().__init__()
         self.generated_profiles: list[tuple[str, str]] = []
 
-    def _parse_response(self, response, request):
+    def parse_response(self, response, request):
         self.generated.append(request.accommodation)
         self.generated_profiles.append((request.accommodation, request.pace))
         return _plan(over_budget=request.accommodation not in ("经济型酒店", "民宿"))

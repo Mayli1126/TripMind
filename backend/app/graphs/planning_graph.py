@@ -1,11 +1,10 @@
 """PlanningGraph：共享规划内核（产品化计划 8.1 节）。
 
-当前形态（批1进行中）：
-- research 已拆为 poi/weather/hotel/intercity 四个并行图节点，reducer 合并；
-- generate_plan 仍是 Planner 单次大 JSON 生成 + 受限修复循环（批2 再拆管线）；
-- budget_confirm interrupt（需 checkpointer）；
-- 进度事件 stage/progress/agent 结构与旧路径一致，前端无感；
-- 异常兜底（fallback 计划）与旧行为一致。
+当前流程：
+- 地点、天气、酒店并行研究；仅兼容非目的地模式时查询跨城信息；
+- 优先生成每日骨架并用地图资料填充，失败时保留完整 JSON 降级路径；
+- 路线与预算确认通过 checkpointer 暂停/恢复；
+- 质量服务统一收尾，任务层负责配额、队列与状态通知。
 """
 
 from __future__ import annotations
@@ -164,19 +163,19 @@ def poi_research_node(state: PlanningState, config: RunnableConfig) -> dict:
     planner = _get_planner()
     callback = _callback_from_config(config)
     request: TripRequest = state["request"]
-    planner._report_progress(
+    planner.report_progress(
         callback, 12, "parallel_research", "景点 Agent 已开始工作", "attractions", "running"
     )
     try:
-        value, warning = planner._run_agent_safely(
+        value, warning = planner.run_agent_safely(
             planner.attraction_agent,
-            planner._build_attraction_query(request),
+            planner.build_attraction_query(request),
             "景点检索",
         )
     except Exception as exc:
         value = _RESEARCH_DEFAULTS["attractions"]
-        warning = f"景点 Agent未完成：{planner._friendly_error(exc)}。"
-    planner._report_progress(
+        warning = f"景点 Agent未完成：{planner.friendly_error(exc)}。"
+    planner.report_progress(
         callback, 30, "parallel_research",
         f"景点 Agent{'已降级' if warning else '已完成'}",
         "attractions", "degraded" if warning else "completed",
@@ -189,19 +188,19 @@ def weather_research_node(state: PlanningState, config: RunnableConfig) -> dict:
     planner = _get_planner()
     callback = _callback_from_config(config)
     request: TripRequest = state["request"]
-    planner._report_progress(
+    planner.report_progress(
         callback, 12, "parallel_research", "天气 Agent 已开始工作", "weather", "running"
     )
     try:
-        value, warning = planner._run_agent_safely(
+        value, warning = planner.run_agent_safely(
             planner.weather_agent,
             f"请查询{request.city}的天气信息",
             "天气查询",
         )
     except Exception as exc:
         value = _RESEARCH_DEFAULTS["weather"]
-        warning = f"天气 Agent未完成：{planner._friendly_error(exc)}。"
-    planner._report_progress(
+        warning = f"天气 Agent未完成：{planner.friendly_error(exc)}。"
+    planner.report_progress(
         callback, 45, "parallel_research",
         f"天气 Agent{'已降级' if warning else '已完成'}",
         "weather", "degraded" if warning else "completed",
@@ -214,19 +213,19 @@ def hotel_research_node(state: PlanningState, config: RunnableConfig) -> dict:
     planner = _get_planner()
     callback = _callback_from_config(config)
     request: TripRequest = state["request"]
-    planner._report_progress(
+    planner.report_progress(
         callback, 12, "parallel_research", "酒店 Agent 已开始工作", "hotels", "running"
     )
     try:
-        value, warning = planner._run_agent_safely(
+        value, warning = planner.run_agent_safely(
             planner.hotel_agent,
             f"请搜索{request.city}的{request.accommodation}酒店",
             "酒店检索",
         )
     except Exception as exc:
         value = _RESEARCH_DEFAULTS["hotels"]
-        warning = f"酒店 Agent未完成：{planner._friendly_error(exc)}。"
-    planner._report_progress(
+        warning = f"酒店 Agent未完成：{planner.friendly_error(exc)}。"
+    planner.report_progress(
         callback, 60, "parallel_research",
         f"酒店 Agent{'已降级' if warning else '已完成'}",
         "hotels", "degraded" if warning else "completed",
@@ -239,21 +238,21 @@ def intercity_research_node(state: PlanningState, config: RunnableConfig) -> dic
     planner = _get_planner()
     callback = _callback_from_config(config)
     request: TripRequest = state["request"]
-    if not request.origin_city:
+    if request.destination_only or not request.origin_city:
         return {}
-    planner._report_progress(
+    planner.report_progress(
         callback, 12, "parallel_research", "交通 Agent 已开始工作", "transportation", "running"
     )
     try:
-        value, warning = planner._query_transportation_context(request)
+        value, warning = planner.query_transportation_context(request)
         transportation = value[0]
         cost = value[1]
         # 兼容测试替身及旧的自定义交通分支返回值。
         option = value[2] if len(value) > 2 else None
     except Exception as exc:
         transportation, cost, option = "", 0, None
-        warning = f"交通 Agent未完成：{planner._friendly_error(exc)}。"
-    planner._report_progress(
+        warning = f"交通 Agent未完成：{planner.friendly_error(exc)}。"
+    planner.report_progress(
         callback, 70, "parallel_research",
         f"交通 Agent{'已降级' if warning else '已完成'}",
         "transportation", "degraded" if warning else "completed",
@@ -272,7 +271,7 @@ def _planner_query_with_candidates(
     planner: MultiAgentTripPlanner, request: TripRequest, context: dict
 ) -> str:
     """构造规划 prompt；请求携带攻略候选时附加候选段落（阶段 2 候选池接入）。"""
-    query = planner._build_planner_query(
+    query = planner.build_planner_query(
         request,
         context.get("attractions", "景点检索暂不可用"),
         context.get("weather", "天气查询暂不可用"),
@@ -292,9 +291,9 @@ def generate_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
     request = _as_request(state["request"])
     context = state.get("context", {})
 
-    planner._report_progress(callback, 72, "research_joined", "并行资料已汇合，准备生成行程")
+    planner.report_progress(callback, 72, "research_joined", "并行资料已汇合，准备生成行程")
     if getattr(request, "candidate_places", None):
-        planner._report_progress(
+        planner.report_progress(
             callback, 74, "candidate_alignment", f"将优先安排你确认的 {len(request.candidate_places)} 个攻略候选地点"
         )
     # 批2 日编排管线优先：容量(确定性) -> 骨架(LLM 只出名称) -> 物化(候选/高德回填)。
@@ -302,14 +301,14 @@ def generate_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
     planner_response = ""
     trip_plan = None
     try:
-        planner._report_progress(callback, 75, "capacity", "正在计算每日时间容量")
+        planner.report_progress(callback, 75, "capacity", "正在计算每日时间容量")
         capacities = build_day_capacities(request, context.get("transportation_option"))
         skeleton_prompt = build_skeleton_prompt(
             request, capacities,
             context.get("attractions", ""),
             context.get("hotels", ""),
         )
-        planner._report_progress(callback, 78, "skeleton_generation", "正在根据时间和偏好编排行程骨架")
+        planner.report_progress(callback, 78, "skeleton_generation", "正在根据时间和偏好编排行程骨架")
         from ..config import get_settings
         if get_settings().skeleton_direct_enabled and hasattr(planner.planner_agent, 'llm'):
             # The skeleton needs no tools or full-plan agent/system prompt.
@@ -321,33 +320,33 @@ def generate_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
             ], max_tokens=max(planner.planner_agent.llm.max_tokens,
                               min(16384, max(2048, request.travel_days * 450 + 512))))
         else:
-            skeleton_raw = planner._run_agent_fresh(planner.planner_agent, skeleton_prompt)
+            skeleton_raw = planner.run_agent_fresh(planner.planner_agent, skeleton_prompt)
         # 若后续结构校验仍需修复，至少把原始骨架交给修复器，不能传空字符串。
         planner_response = skeleton_raw
         skeletons, overall = parse_skeleton(skeleton_raw, capacities)
-        planner._report_progress(callback, 82, "materializing", "正在用地图数据填充景点坐标")
+        planner.report_progress(callback, 82, "materializing", "正在用地图数据填充景点坐标")
         trip_plan = materialize_skeleton(request, skeletons, overall)
-        planner._report_progress(callback, 86, "validating", "正在校验计划结构与可执行性")
+        planner.report_progress(callback, 86, "validating", "正在校验计划结构与可执行性")
     except DayPipelineError as exc:
         print(f"⚠️ 日编排管线回退单次生成：{exc}")
-        planner._report_progress(callback, 78, "fallback_generation", "骨架需要调整，正在重新生成完整行程")
+        planner.report_progress(callback, 78, "fallback_generation", "骨架需要调整，正在重新生成完整行程")
         trip_plan = None
 
     if trip_plan is None:
         planner_query = _planner_query_with_candidates(planner, request, context)
-        planner_response = planner._run_agent_fresh(planner.planner_agent, planner_query)
+        planner_response = planner.run_agent_fresh(planner.planner_agent, planner_query)
         print(f"行程规划结果: {planner_response[:300]}...")
-        planner._report_progress(callback, 86, "validating", "正在校验计划结构与可执行性")
-        trip_plan = planner._parse_response(planner_response, request)
+        planner.report_progress(callback, 86, "validating", "正在校验计划结构与可执行性")
+        trip_plan = planner.parse_response(planner_response, request)
     replan_count = 0
-    if planner._needs_repair(trip_plan, request):
+    if planner.needs_repair(trip_plan, request):
         print("🔁 Validator发现结构性问题，执行一次受限重规划...")
-        planner._report_progress(callback, 89, "repair_generation", "发现结构问题，正在自动修复")
-        repaired_plan = planner._repair_plan(request, planner_response)
+        planner.report_progress(callback, 89, "repair_generation", "发现结构问题，正在自动修复")
+        repaired_plan = planner.repair_plan(request, planner_response)
         replan_count = 1
         if (
-            not planner._needs_repair(repaired_plan, request)
-            and planner._plan_score(repaired_plan, request) > planner._plan_score(trip_plan, request)
+            not planner.needs_repair(repaired_plan, request)
+            and planner.plan_score(repaired_plan, request) > planner.plan_score(trip_plan, request)
         ):
             trip_plan = repaired_plan
             trip_plan.planning_iterations = 2
@@ -452,7 +451,7 @@ def route_confirm_node(state: PlanningState, config: RunnableConfig) -> dict:
     options = _build_route_options(request)
     if len(options) <= 1:
         return {}  # 档位已到边界，没有有意义的变体
-    planner._report_progress(callback, 70, "route_confirm", "已准备多个行程方向，等待选择")
+    planner.report_progress(callback, 70, "route_confirm", "已准备多个行程方向，等待选择")
     answer = interrupt({
         "type": "route_confirm",
         "question": "生成前先选一个行程方向（都会包含你确认的攻略候选地点）：",
@@ -462,7 +461,7 @@ def route_confirm_node(state: PlanningState, config: RunnableConfig) -> dict:
         "current_pace": request.pace,
     })
     adjusted = _apply_route_choice(request, str(answer))
-    planner._report_progress(
+    planner.report_progress(
         callback, 72, "route_confirmed", f"已按「{adjusted.accommodation} · {adjusted.pace}节奏」方向生成行程"
     )
     return {"request": adjusted}
@@ -471,7 +470,7 @@ def route_confirm_node(state: PlanningState, config: RunnableConfig) -> dict:
 def budget_confirm_node(state: PlanningState, config: RunnableConfig) -> dict:
     """预算确认 interrupt：超预算时暂停询问用户是否降级住宿重新生成。
 
-    - 生成路径的 `_parse_response` 会 pop budget（预算延迟到 finalize 算），
+    - 生成路径的 `parse_response` 会 pop budget（预算延迟到 finalize 算），
       所以这里必须**现算**预算判断，读 plan.budget 恒为 None（曾因此死代码）；
     - 恢复执行时 interrupt() 返回用户答案（"downgrade" / "keep"）；
     - 最多降级重生成 1 次（budget_downgrade_attempts 熔断），防循环。
@@ -529,16 +528,16 @@ def budget_confirm_node(state: PlanningState, config: RunnableConfig) -> dict:
         plan.warnings.append("已是最低住宿档次，无法降级，保留当前计划。")
         return {}
 
-    planner._report_progress(
+    planner.report_progress(
         callback, 90, "replanning", f"住宿已降级为「{downgraded.accommodation}」，正在重新生成行程"
     )
     context = state.get("context", {})
     # 降级重排同样携带攻略候选，用户必去地点不因预算降级丢失
     planner_query = _planner_query_with_candidates(planner, downgraded, context)
-    planner_response = planner._run_agent_fresh(planner.planner_agent, planner_query)
-    new_plan = planner._parse_response(planner_response, downgraded)
-    if planner._needs_repair(new_plan, downgraded):
-        new_plan = planner._repair_plan(downgraded, planner_response)
+    planner_response = planner.run_agent_fresh(planner.planner_agent, planner_query)
+    new_plan = planner.parse_response(planner_response, downgraded)
+    if planner.needs_repair(new_plan, downgraded):
+        new_plan = planner.repair_plan(downgraded, planner_response)
     new_plan.warnings.append(
         f"为满足预算上限 ¥{request.budget_limit}，住宿已降级为「{downgraded.accommodation}」并重新生成。"
     )
@@ -572,7 +571,7 @@ def finalize_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
     trip_plan = _as_plan(state["plan"])
     request = _as_request(state["request"])
 
-    planner._report_progress(callback, 93, "optimizing", "正在核对时间轴、路线和预算")
+    planner.report_progress(callback, 93, "optimizing", "正在核对时间轴、路线和预算")
     trip_plan = trip_quality_service.finalize(
         trip_plan,
         request,
@@ -582,7 +581,7 @@ def finalize_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
     )
     # 总体建议：收尾时基于完整行程（含预算/天气/交通约束）重写为多条实用贴士；
     # 失败保留骨架阶段的两三句话原文，绝不影响主流程出结果
-    planner._report_progress(callback, 96, "tips", "正在根据完整行程整理出行建议")
+    planner.report_progress(callback, 96, "tips", "正在根据完整行程整理出行建议")
     try:
         trip_plan.overall_suggestions = trip_quality_service.refine_overall_suggestions(
             trip_plan, request
@@ -590,11 +589,11 @@ def finalize_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
     except Exception:
         pass
     if trip_plan.is_fallback:
-        planner._report_progress(
+        planner.report_progress(
             callback, 97, "degraded", "生成结果不完整，已切换为参考计划并标注原因"
         )
     else:
-        planner._report_progress(callback, 97, "finalized", "行程与出行建议已整理完成")
+        planner.report_progress(callback, 97, "finalized", "行程与出行建议已整理完成")
 
     return {"result": trip_plan}
 
@@ -671,7 +670,7 @@ def run_planning_graph(
     if progress_callback:
         progress_callback(3, "initializing", "正在准备地图工具与规划服务")
     planner = _get_planner()
-    planner._report_progress(progress_callback, 5, "initializing", "正在理解旅行需求与约束")
+    planner.report_progress(progress_callback, 5, "initializing", "正在理解旅行需求与约束")
     degraded_warnings: list[str] = []
     try:
         config = {
@@ -724,12 +723,12 @@ def run_planning_graph(
         print(f"❌ 生成旅行计划失败: {str(exc)}")
         import traceback
         traceback.print_exc()
-        fallback = planner._create_fallback_plan(
+        fallback = planner.create_fallback_plan(
             request,
-            reason=f"规划执行失败：{planner._friendly_error(exc)}",
+            reason=f"规划执行失败：{planner.friendly_error(exc)}",
         )
         fallback.warnings.extend(degraded_warnings)
-        planner._report_progress(
+        planner.report_progress(
             progress_callback, 97, "degraded", "规划执行失败，已生成可用的参考计划"
         )
         return trip_quality_service.finalize(fallback, request)

@@ -2,11 +2,11 @@
 import json
 import time
 from uuid import uuid4
-from .auth_service import auth_service
+from ..infrastructure.database import application_database
 
 
 def initialize():
-    with auth_service.connection() as db:
+    with application_database.connection() as db:
         db.executescript('''
         CREATE TABLE IF NOT EXISTS conversations (
           id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL,
@@ -36,7 +36,7 @@ def initialize():
 
 
 def memories(user_id):
-    with auth_service.connection() as db:
+    with application_database.connection() as db:
         return [dict(row) for row in db.execute('SELECT * FROM preference_memories WHERE user_id=? ORDER BY updated_at DESC', (user_id,))]
 
 

@@ -10,7 +10,8 @@ from ..config import get_settings
 from ..services.auth_service import COOKIE_NAME, auth_service
 
 _PUBLIC = {"/api/auth/status", "/api/auth/login", "/api/auth/register"}
-_PRIVATE = ("/api/library", "/api/guide-sources", "/api/trip", "/api/planner-chat", "/api/admin", "/api/auth")
+# 地图查询同样消耗服务端配额，不作为匿名代理公开。
+_PRIVATE = ("/api/library", "/api/guide-sources", "/api/trip", "/api/planner-chat", "/api/admin", "/api/auth", "/api/map", "/api/poi")
 _RESOURCES = (
     (re.compile(r"^/api/library/trips/([^/]+)"), "trip"),
     (re.compile(r"^/api/guide-sources/([^/]+)"), "guide"),

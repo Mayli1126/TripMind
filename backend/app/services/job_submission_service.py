@@ -5,10 +5,11 @@ import time
 from uuid import uuid4
 from fastapi import HTTPException
 from .auth_service import auth_service
+from ..infrastructure.database import application_database
 
 
 def initialize():
-    with auth_service.connection() as db:
+    with application_database.connection() as db:
         db.execute('''CREATE TABLE IF NOT EXISTS job_submissions (
             user_id TEXT NOT NULL, request_key TEXT NOT NULL, fingerprint TEXT NOT NULL,
             job_id TEXT NOT NULL, created_at REAL NOT NULL, create_until REAL NOT NULL,
@@ -26,7 +27,7 @@ def submit_once(request,kind,payload,create):
     request_key=f'{kind}:'+('key:'+header if header else 'active:'+fingerprint)
     now=time.time(); token=uuid4().hex
     initialize()
-    with auth_service.connection() as db:
+    with application_database.connection() as db:
         db.execute('BEGIN IMMEDIATE')
         row=db.execute('SELECT * FROM job_submissions WHERE user_id=? AND request_key=?',(user_id,request_key)).fetchone()
         ttl=86400 if header else 60
@@ -70,6 +71,6 @@ def submit_once(request,kind,payload,create):
              'service':'submission','status':'created'})
         return job
     finally:
-        with auth_service.connection() as db:
+        with application_database.connection() as db:
             db.execute('UPDATE job_submissions SET create_until=0 WHERE user_id=? AND request_key=? AND create_token=?',
                        (user_id,request_key,token))

@@ -7,8 +7,8 @@ import hmac
 import secrets
 import sqlite3
 import time
-from contextlib import contextmanager
-from pathlib import Path
+
+from ..infrastructure.database import Database, application_database
 
 from ..models.schemas import UserPreferences
 
@@ -18,21 +18,15 @@ SESSION_SECONDS = 14 * 24 * 3600
 
 class AuthService:
     def __init__(self, database_path=None):
-        self.database_path = Path(database_path or Path(__file__).resolve().parents[2] / "data" / "tripmind.db")
+        self._database = Database(database_path) if database_path is not None else application_database
 
-    @contextmanager
+    @property
+    def database_path(self):
+        return self._database.path
+
     def connection(self):
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.database_path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        try:
-            yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        # 保留已有调用入口；连接和事务规则统一由基础设施管理。
+        return self._database.connection()
 
     def initialize(self):
         with self.connection() as db:
