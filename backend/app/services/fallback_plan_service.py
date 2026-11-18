@@ -1,6 +1,6 @@
 """离线降级模板：与 Agent、工具连接和正常规划流程隔离。"""
 
-from ..models.schemas import TripRequest, TripPlan, DayPlan, Attraction, Meal, WeatherInfo, Location, Hotel, Budget
+from ..models.schemas import TripRequest, TripPlan, DayPlan, Attraction, WeatherInfo, Location, Hotel, Budget
 from .trip_quality_service import trip_quality_service
 
 
@@ -126,14 +126,6 @@ def create_fallback_plan(request: TripRequest, reason: str = "外部工具或模
             ))
             total_attractions_cost += price
 
-        # 餐饮(每天早中晚)
-        meals = [
-            Meal(type="breakfast", name=f"{request.city}特色早餐", description=f"第{i+1}天早晨品尝当地特色早点", estimated_cost=25),
-            Meal(type="lunch", name=f"当地特色午餐", description=f"景点附近{request.city}地道美食", estimated_cost=60),
-            Meal(type="dinner", name=f"精选晚餐", description=f"品尝{request.city}特色美食,感受当地饮食文化", estimated_cost=80),
-        ]
-        total_meals_cost += 25 + 60 + 80
-
         # 酒店(每天推荐一个)
         hotel_cost = cost_range[0] + (i * 37) % (cost_range[1] - cost_range[0])
         total_hotel_cost += hotel_cost
@@ -168,7 +160,7 @@ def create_fallback_plan(request: TripRequest, reason: str = "外部工具或模
             accommodation=request.accommodation,
             hotel=hotel,
             attractions=attractions,
-            meals=meals,
+            meals=[],
         )
         days.append(day_plan)
 

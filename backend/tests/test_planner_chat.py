@@ -1,4 +1,4 @@
-"""Focused chat-format recovery and readiness tests; no external services."""
+"""针对对话格式恢复与就绪状态的测试，不调用外部服务。"""
 import json
 import unittest
 from datetime import date
@@ -21,7 +21,7 @@ class PlannerChatTests(unittest.TestCase):
         self.today_patch = patch.object(service, 'get_app_today', return_value=date(2026, 11, 1))
         self.today_patch.start()
         self.addCleanup(self.today_patch.stop)
-        # Request validation must use the same frozen date as the chat service.
+        # 请求校验必须与对话服务使用相同的固定日期。
         self.schema_today_patch = patch('app.models.schemas.get_app_today', return_value=date(2026, 11, 1))
         self.schema_today_patch.start()
         self.addCleanup(self.schema_today_patch.stop)
@@ -86,7 +86,7 @@ class PlannerChatTests(unittest.TestCase):
 
     def test_ready_reply_does_not_ask_another_question(self):
         self.client.invoke.return_value = self.response({'preferences_confirmed': True})
-        # The model may ask a redundant optional question despite valid collected fields.
+        # 即使已收集字段有效，模型也可能多问一个可选问题。
         self.client.invoke.return_value = self.client.invoke.return_value.replace('好的', '这次几位出行？')
         result = service.chat_about_trip(self.payload())
         self.assertTrue(result.ready)

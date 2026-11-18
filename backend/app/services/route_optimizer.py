@@ -3,16 +3,9 @@
 from __future__ import annotations
 
 from math import asin, cos, radians, sin, sqrt
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
-from ..models.schemas import (
-    Attraction,
-    DailyRouteSummary,
-    Location,
-    Meal,
-    OptimizationSummary,
-    TripPlan,
-)
+from ..models.schemas import Attraction, DailyRouteSummary, Location, OptimizationSummary, TripPlan
 
 
 class RouteOptimizer:

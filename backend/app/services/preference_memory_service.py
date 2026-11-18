@@ -1,4 +1,4 @@
-"""Explicit preferences only: deterministic slots, city overrides and expiry."""
+"""仅记录显式偏好，使用确定性字段槽位，并支持城市覆盖和过期时间。"""
 import time
 import unicodedata
 from typing import Literal
@@ -35,7 +35,7 @@ class MemoryWrite(BaseModel):
 
     @model_validator(mode='after')
     def validate_preference(self):
-        # Preserve fields_set so an old client's partial write cannot blank added columns.
+        # 保留显式赋值字段集合，避免旧客户端的局部写入清空新增列。
         for name in ('content', 'value', 'city'):
             object.__setattr__(self, name, getattr(self, name).strip())
         if self.category == 'general' and not self.content:

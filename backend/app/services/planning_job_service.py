@@ -118,7 +118,7 @@ class RedisJobRecorder:
         self, progress: int, stage: str, message: str, status: str,
         agent: Optional[str] = None, agent_status: Optional[str] = None,
     ) -> None:
-        # All four graph branches use this recorder: merge their state under one lock.
+        # 四个图分支共用此记录器，合并状态时使用同一把锁。
         with self._update_lock:
             self._update_locked(progress, stage, message, status, agent, agent_status)
 
@@ -484,8 +484,13 @@ class PlanningJobService:
                 self._update(job_id,0,'cancelled','任务已取消，后续步骤不会继续执行','cancelled')
                 return
             with self._lock:
-                self._jobs[job_id]["error"] = f'执行中断（{type(exc).__name__}），请重试；任务编号 {job_id}'
-            self._update(job_id, 100, "failed", "规划失败，请稍后重试", "failed")
+                public_message = getattr(exc,'public_message',None)
+                # 内存执行也可能直接收到校验异常，原因与子进程路径保持一致。
+                from .tourism_research_service import TourismResearchError
+                if isinstance(exc,TourismResearchError):
+                    public_message = str(exc)[:300]
+                self._jobs[job_id]["error"] = public_message or f'执行中断（{type(exc).__name__}），请重试；任务编号 {job_id}'
+            self._update(job_id, 100, "failed", public_message or "规划失败，请稍后重试", "failed")
 
     def _update(
         self,

@@ -1,4 +1,4 @@
-"""Conversational planning entry point; no itinerary is created until confirmed."""
+"""对话式规划入口，用户确认前不创建行程。"""
 
 import logging
 
@@ -35,7 +35,7 @@ def send_message(payload: PlannerChatRequest, request: Request):
             result.request.conversation_context = summary_context[:4200]
         return result
     except Exception as exc:
-        # Do not log exception text/traceback: provider errors may include keys or conversation text.
+        # 不记录异常正文或堆栈，上游错误可能包含密钥或对话内容。
         category = 'internal'
         detail = '这次没能整理好你的需求，消息还在，请稍后点“再试一次”。'
         status = 502

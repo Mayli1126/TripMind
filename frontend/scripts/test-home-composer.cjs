@@ -1,4 +1,4 @@
-// Isolated visual/interaction check: no account, model, map or business data access.
+// 隔离检查页面与交互，不访问真实账号、模型、地图或业务数据。
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')

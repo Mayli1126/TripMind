@@ -1,4 +1,4 @@
-# Logs
+# 日志
 logs
 *.log
 npm-debug.log*
@@ -12,7 +12,7 @@ dist
 dist-ssr
 *.local
 
-# Editor directories and files
+# 编辑器目录与文件
 .vscode/*
 !.vscode/extensions.json
 .idea
@@ -23,7 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 
-# Environment（.env 含真实高德 Key，绝不提交；example 是模板需要提交）
+# 环境变量（.env 含真实高德 Key，绝不提交；example 是模板需要提交）
 .env
 .env.*
 !.env.example

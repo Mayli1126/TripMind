@@ -1,4 +1,4 @@
-"""Public login/registration, private session identity and administrator overview."""
+"""提供公开登录注册、私有会话身份与管理员概览。"""
 
 import sqlite3
 
@@ -91,8 +91,17 @@ def warmup():
 
 @admin_router.get('/runtime/diagnostics')
 def runtime_diagnostics(request: Request):
-    # Explicit check as well as the existing admin route middleware.
+    # 除现有管理员路由中间件外，此处再进行显式校验。
     if current_user(request)['role'] != 'admin':
         raise HTTPException(403, '需要管理员权限')
     from ...services.operations_service import operational_snapshot
     return operational_snapshot()
+
+
+@admin_router.get('/search/quota')
+def search_quota(request: Request):
+    """管理员读取搜索额度；只读本地账本，不调用百度服务。"""
+    if current_user(request)['role'] != 'admin':
+        raise HTTPException(403, '需要管理员权限')
+    from ...services.baidu_search_service import BaiduSearchService
+    return BaiduSearchService().quota_status()

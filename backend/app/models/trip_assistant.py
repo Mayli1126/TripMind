@@ -1,4 +1,4 @@
-"""Version-bound itinerary conversation; answers never mutate a saved trip."""
+"""对话绑定行程版本，回答不会直接修改已保存的行程。"""
 
 from pydantic import BaseModel, Field
 from .planner_chat import PlannerChatMessage

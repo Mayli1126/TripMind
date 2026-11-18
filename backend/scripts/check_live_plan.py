@@ -1,6 +1,6 @@
-"""One small real planning run. Uses configured APIs; does not save a trip/user.
+"""执行一次小规模真实规划，使用已配置接口，不保存行程或用户。
 
-Requires local Redis when enabled. Prints diagnostics and a summary, redacting configured secrets.
+启用 Redis 时需要本地服务，输出诊断与摘要时隐藏配置中的敏感值。
 """
 import contextlib
 from datetime import timedelta
@@ -39,7 +39,7 @@ def main():
             output.flush()
         def fileno(self):
             return output.fileno()
-    # MCP subprocesses require a real stderr file descriptor; do not replace it with StringIO.
+    # MCP 子进程需要真实标准错误文件描述符，不能用 StringIO 替代。
     with contextlib.redirect_stdout(DiagnosticOutput()):
         from app.config import get_settings
         from app.infrastructure import redis_client

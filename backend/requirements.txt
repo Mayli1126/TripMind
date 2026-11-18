@@ -9,6 +9,8 @@ langgraph-checkpoint-redis==0.2.1
 redisvl==0.13.0
 openai==1.109.1
 mcp==1.28.1
+# 原生工具参数的本地 JSON Schema 校验，不能只依赖模型遵守参数格式。
+jsonschema==4.26.0
 
 # FastAPI 服务
 fastapi==0.138.2

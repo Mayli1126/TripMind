@@ -246,9 +246,9 @@ async function loadRecent() {
 
 async function loadCandidates(city: string) {
   let local: CandidatePlace[] = []
-  try { local = JSON.parse(localStorage.getItem(CANDIDATE_KEY) || '[]') } catch { /* No local selection yet. */ }
+  try { local = JSON.parse(localStorage.getItem(CANDIDATE_KEY) || '[]') } catch { /* 尚无本地选择记录。 */ }
   let list = local
-  try { list = await fetchGuideCandidates(city) } catch { /* Retain the user's local selection. */ }
+  try { list = await fetchGuideCandidates(city) } catch { /* 查询失败时保留用户的本地选择。 */ }
   if (draft.value.city !== city) return
   const choices = new Map(local.map(place => [place.candidate_id, place.user_choice]))
   candidates.value = list.map(place => ({ ...place, user_choice: choices.get(place.candidate_id) ?? place.user_choice }))
@@ -351,7 +351,7 @@ async function finishTask(task: Promise<TripPlan>, request: TripFormData) {
     const saved = await createSavedTrip(request, plan)
     destination = `/trips/${saved.id}`
   } catch {
-    // The completed itinerary remains viewable even if saving is temporarily unavailable.
+    // 即使暂时无法保存，已完成的行程仍可查看。
   }
   if (!alive) return
   sessionStorage.removeItem(CHAT_KEY)
@@ -367,7 +367,7 @@ function handleTaskError(cause: any) {
     sessionStorage.removeItem(ACTIVE_JOB_KEY);jobId.value='';error.value='';persist();return
   }
   error.value = cause.response?.data?.detail || cause.message || '这次规划没有完成，可以重新尝试。'
-  // Keep the job identity: a connection failure does not mean the worker failed.
+  // 保留任务标识，连接失败不代表后台执行失败。
 }
 
 function stopPlanning() {

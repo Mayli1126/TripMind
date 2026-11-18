@@ -183,7 +183,7 @@ def pop_due_retries() -> list[dict[str, Any]]:
     items = client.zrangebyscore(_RETRY, 0, time.time())
     if not items:
         return []
-    # Publish + remove in one transaction; never lose a retry between ZREM and XADD.
+    # 发布与移除在同一事务中完成，避免在 ZREM 和 XADD 之间丢失重试任务。
     moved=[]
     from redis.exceptions import WatchError
     for item in items:
@@ -259,7 +259,7 @@ def reclaim_jobs():
 
 
 def transition_job(job_id, allowed, **fields):
-    """CAS for cancel/resume; terminal decisions cannot be undone by a late writer."""
+    """取消与恢复采用条件更新，迟到的写入不能推翻终态决策。"""
     from redis.exceptions import WatchError
     key=f'trip:job:{job_id}'; client=_get_client()
     for _ in range(8):
@@ -310,7 +310,7 @@ def guarded_job_write(job_id, token, fields, allowed=None):
 
 
 def publish_job(job_id, job_type, payload, initial):
-    """Initial state and queue entry commit together, including a deduplicated job ID."""
+    """初始状态和队列记录一起提交，并包含去重后的任务标识。"""
     from redis.exceptions import WatchError
     from ..services.job_admission import ADMISSION_KEY, check_capacity, redis_records, expire_records, submission_owner
     ensure_group(); key=f'trip:job:{job_id}'; client=_get_client()

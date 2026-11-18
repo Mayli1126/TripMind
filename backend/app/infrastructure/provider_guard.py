@@ -1,4 +1,4 @@
-"""Credential-scoped admission on reliable Redis; explicit single-process local mode."""
+"""基于可靠 Redis 按凭据限制调用准入，并提供显式的本地单进程模式。"""
 import asyncio
 from contextlib import contextmanager, asynccontextmanager
 import hashlib
@@ -71,7 +71,7 @@ class ProviderGuard:
             raise ProviderBusyError('上游保护状态暂不可用，未降级直连') from exc
 
     def scope(self, provider, credential, endpoint=''):
-        # Models share an account limit. Never store raw key, endpoint or prompt.
+        # 模型共用账号配额，不保存原始密钥、服务地址或提示词。
         digest = hashlib.sha256(f'{provider}\0{endpoint.rstrip("/")}\0{credential}'.encode()).hexdigest()
         return f'tripmind:guard:v1:{{{digest}}}'
 
@@ -162,7 +162,7 @@ class ProviderGuard:
                 self.release(permit)
                 emit('provider_guard', 'release', 'completed')
             except ProviderBusyError:
-                pass  # crashed/unreachable permits expire; never delete others' tokens
+                pass  # 崩溃或不可达进程的许可会自动过期，不能删除其他持有者的令牌。
 
     @asynccontextmanager
     async def async_slot(self, provider, credential):

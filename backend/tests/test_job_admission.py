@@ -1,4 +1,4 @@
-"""Offline policy checks, not Redis transaction or worker integration tests."""
+"""离线检查策略规则，不执行 Redis 事务或执行器集成测试。"""
 from unittest import TestCase
 from unittest.mock import patch, MagicMock
 from fastapi import HTTPException

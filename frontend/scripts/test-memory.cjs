@@ -1,4 +1,4 @@
-// Isolated browser fixtures only; no real account, model, map or database writes.
+// 仅使用隔离的浏览器测试数据，不调用真实账号、模型、地图，也不写入业务数据库。
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')

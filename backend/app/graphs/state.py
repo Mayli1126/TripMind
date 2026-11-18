@@ -20,7 +20,7 @@ def merge_context(left: Optional[dict], right: Optional[dict]) -> dict:
 
 
 class PlanningState(TypedDict, total=False):
-    mode: str                                  # "plan" | "revision"
+    mode: str                                  # 模式取值："plan" 表示生成，"revision" 表示修改。
     job_id: str
     request: TripRequest
 
@@ -48,4 +48,5 @@ class PlanningState(TypedDict, total=False):
     transportation_option: Any
 
     result: Optional[TripPlan]
+    planning_feedback: dict                    # 服务端生成的冲突与冻结快照，不包含模型自动修复。
     error: Optional[str]

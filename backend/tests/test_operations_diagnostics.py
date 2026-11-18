@@ -1,4 +1,4 @@
-"""Offline diagnostics contracts, no live Redis/provider probes."""
+"""离线验证诊断契约，不探测真实 Redis 或上游服务。"""
 import json
 from unittest import TestCase
 from unittest.mock import patch

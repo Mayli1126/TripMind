@@ -20,6 +20,21 @@ from ..config import get_settings
 from .mcp_runtime import amap_runtime
 
 
+class MCPToolExecutionError(ValueError):
+    """工具已返回业务错误；不按会话断开自动重试，也不暴露上游正文。"""
+
+
+# 当前研究流程只授权地图查询，不能仅凭上游自行声明就放行未来新增的写工具。
+_READ_ONLY_MAP_TOOLS = frozenset({
+    "maps_text_search", "maps_around_search", "maps_search_detail", "maps_weather",
+    "maps_geo", "maps_regeocode", "maps_regeo", "maps_ip_location", "maps_distance",
+    "maps_direction_walking", "maps_direction_driving", "maps_direction_bicycling",
+    "maps_direction_transit_integrated", "maps_direction_walking_by_address",
+    "maps_direction_driving_by_address", "maps_direction_transit_integrated_by_address",
+    "maps_convert", "maps_schema_personal_map", "maps_schema_navi", "maps_schema_take_taxi",
+})
+
+
 class _LoopThread:
     """承载 MCP 异步调用的后台事件循环。"""
 
@@ -57,7 +72,7 @@ class _LoopThread:
 
 
 class _StdioSession:
-    """A single owner task opens/closes MCP contexts and serializes tool calls."""
+    """由同一个所有者任务打开和关闭 MCP 上下文，并串行执行工具调用。"""
 
     def __init__(self, command: List[str], env: Dict[str, str], startup_timeout=120) -> None:
         self._command, self._env = command, env
@@ -77,7 +92,7 @@ class _StdioSession:
         async with self._startup_lock:
             if not self._owner or self._owner.done():
                 self._ready = asyncio.get_running_loop().create_future()
-                # A timed-out waiter may be gone when startup finally fails.
+                # 启动最终失败时，之前超时的等待者可能已经退出。
                 self._ready.add_done_callback(lambda future: future.exception() if not future.cancelled() else None)
                 self._owner = asyncio.create_task(self._serve())
             await asyncio.shield(self._ready)
@@ -89,7 +104,7 @@ class _StdioSession:
         pending = None
         params = StdioServerParameters(command=self._command[0], args=self._command[1:], env=self._env)
         try:
-            # Context enter/exit happen in this same task (required by AnyIO).
+            # 上下文必须在同一个任务中进入和退出，这是 AnyIO 的要求。
             async with stdio_client(params) as (read_stream, write_stream):
                 async with ClientSession(read_stream, write_stream) as session:
                     async with asyncio.timeout(self._startup_timeout):
@@ -116,6 +131,12 @@ class _StdioSession:
                             pending = None
                             continue
                         parts = [item.text for item in result.content or [] if getattr(item, "text", None)]
+                        # MCP 协议里的 isError 不等于网络异常，应明确交回业务层处理。
+                        if getattr(result, "isError", False):
+                            if not pending.done():
+                                pending.set_exception(MCPToolExecutionError("地图工具返回业务错误"))
+                            pending = None
+                            continue
                         if not pending.done():
                             pending.set_result("\n".join(parts))
                         pending = None
@@ -193,7 +214,7 @@ class MCPClientManager:
         return session.tools
 
     def warmup(self):
-        # Cold uv processes previously competed for cache locks: prepare sequentially.
+        # 冷启动的 uv 进程会争抢缓存锁，因此按顺序预热。
         for index in range(self._pool_size):
             tools = self.list_tools(session_hint=index + 1)
             print(f"地图工具已就绪：会话 {index + 1}/{self._pool_size}，{len(tools)} 个工具")
@@ -236,7 +257,7 @@ def get_amap_manager() -> MCPClientManager:
 
 
 def amap_manager_status():
-    """Reading status never starts a subprocess or downloads packages."""
+    """读取状态不会启动子进程或下载依赖包。"""
     if _manager is None:
         return {"ready": False, "ready_sessions": 0, "pool_size": get_settings().mcp_pool_size}
     return _manager.status()
@@ -288,6 +309,7 @@ class MCPToolAdapter:
                 "server_tool": tool["name"],
                 "description": tool["description"],
                 "schema": tool["input_schema"],
+                "read_only": tool["name"] in _READ_ONLY_MAP_TOOLS,
             })
         return tools
 
@@ -295,14 +317,15 @@ class MCPToolAdapter:
         prefix = f"{self.name}_"
         return expanded_name[len(prefix):] if expanded_name.startswith(prefix) else expanded_name
 
-    def param_types(self, expanded_name: str) -> Dict[str, str]:
-        """从 inputSchema 提取参数类型，供 [TOOL_CALL] 参数做类型转换。"""
-        server_tool = self.get_server_tool_name(expanded_name)
-        for tool in self._ensure_tools():
-            if tool["name"] == server_tool:
-                properties = (tool.get("input_schema") or {}).get("properties", {})
-                return {key: str(info.get("type", "string")) for key, info in properties.items()}
-        return {}
-
     def call_expanded(self, expanded_name: str, arguments: Dict[str, Any]) -> str:
-        return self.manager.call_tool(self.get_server_tool_name(expanded_name), arguments)
+        result = self.manager.call_tool(self.get_server_tool_name(expanded_name), arguments)
+        # 部分 MCP 封装未设置 isError，而是在 JSON 正文返回失败，仍不能计作查询成功。
+        import json
+        try:
+            payload = json.loads(result)
+        except (ValueError, TypeError):
+            payload = None
+        if isinstance(payload, dict) and (str(payload.get("status")) == "0"
+                                         or payload.get("success") is False or payload.get("error")):
+            raise MCPToolExecutionError("地图服务未返回成功查询结果")
+        return result

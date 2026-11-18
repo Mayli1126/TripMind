@@ -144,7 +144,7 @@ class ImageGuideProvider:
         return GuideDocument(title=source.title.strip(), content="", truncated=False)
 
 
-# Provider 注册表：按声明顺序匹配第一个 can_handle 的实现
+# 上游提供方 注册表：按声明顺序匹配第一个 can_handle 的实现
 PROVIDERS: list[GuideProvider] = [
     TextGuideProvider(),
     UrlGuideProvider(),

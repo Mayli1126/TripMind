@@ -1,4 +1,4 @@
-"""Conservative source-preserving projection of guide clues; no external lookups."""
+"""保守投影攻略线索并保留来源，不发起外部查询。"""
 from ..models.advisory import AttractionAdvisory
 from ..models.candidate import CandidatePlace
 from .candidate_pool_service import normalize_name
@@ -11,14 +11,14 @@ def enrich_advisories(plan, request):
     notes = []
     for day in plan.days:
         for attraction in day.attractions:
-            # No trusted live advisory provider yet: never accept generated verification claims.
+            # 尚无可信实时提醒来源，不能接受生成内容声称已核验。
             attraction.advisory = None
             if attraction.poi_id:
                 matches = [c for c in candidates if c.poi_id == attraction.poi_id]
             else:
                 matches = [c for c in candidates if normalize_name(attraction.name) in
                            {normalize_name(c.canonical_name), *(normalize_name(a) for a in c.aliases)}]
-                # A name alone must not join distinct map places.
+                # 不能仅凭名称将不同地图地点合并为同一地点。
                 if len({c.poi_id for c in matches if c.poi_id}) > 1:
                     matches = []
             tips = list(dict.fromkeys(tip for c in matches for tip in c.warnings if tip.strip()))
@@ -34,7 +34,7 @@ def enrich_advisories(plan, request):
                 reservation_required='true' if reservation else 'unknown',
                 closure_rules=closure, pitfall_tips=[tip for tip in tips if tip not in closure],
                 source_refs=list(dict.fromkeys(ref for c in matches for ref in c.source_refs)),
-                # Map POI verification proves neither booking policy nor opening status.
+                # 地图地点核验不能证明预约政策或营业状态。
                 fact_status='unverified', confidence=0,
             )
             if reservation or closure:

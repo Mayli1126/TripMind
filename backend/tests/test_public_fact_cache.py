@@ -1,4 +1,4 @@
-"""Offline stage-C contract checks, not provider/Redis integration tests."""
+"""离线检查公共事实缓存契约，不执行上游或 Redis 集成测试。"""
 from datetime import datetime, timedelta, timezone
 from unittest import TestCase
 from unittest.mock import patch

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import List
 
 from ..models.schemas import Attraction, DayPlan, TripPlan, TripRequest
 
@@ -94,9 +93,6 @@ class PhysicalStrengthService:
             is_last_day = day_index == total_days - 1
             is_middle_day = not is_first_day and not is_last_day
 
-            # 获取当天景点强度
-            intensities = [self.calculate_attraction_intensity(a) for a in day.attractions]
-            
             # 如果是第一天或最后一天，降低整体强度
             if is_first_day or is_last_day:
                 day = self._reduce_day_intensity(day, max_intensity=4)
@@ -121,7 +117,7 @@ class PhysicalStrengthService:
             intensity = self.calculate_attraction_intensity(attraction)
             if intensity > max_intensity:
                 # 降低游览时长来减少强度
-                if attraction.visit_duration:
+                if attraction.visit_duration and not attraction.match_evidence:
                     attraction.visit_duration = int(attraction.visit_duration * 0.7)
         return day
 

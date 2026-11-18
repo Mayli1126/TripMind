@@ -1,4 +1,4 @@
-"""Trace complete HTTP lifetimes without logging private request/exception contents."""
+"""追踪完整 HTTP 请求生命周期，不记录私密请求内容或异常正文。"""
 import re
 import sqlite3
 import time
@@ -46,7 +46,7 @@ class RequestTraceMiddleware:
             if frame:
                 error_location = f'{Path(frame.tb_frame.f_code.co_filename).name}:{frame.tb_lineno}'
             if headers_sent:
-                # A second response would corrupt an already-started SSE stream.
+                # SSE 流已经开始后不能再次发送响应，否则会破坏数据流。
                 raise
             busy = (isinstance(exc, sqlite3.OperationalError) and
                     (getattr(exc, 'sqlite_errorcode', 0) & 255) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})

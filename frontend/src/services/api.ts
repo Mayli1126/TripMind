@@ -1,4 +1,5 @@
 import axios from 'axios'
+import type { ManualOperation } from './revision'
 import type {
   CandidatePlace,
   GuideSourcePayload,
@@ -7,14 +8,11 @@ import type {
   PlanningProgressEvent,
   TripFormData,
   TripPlan,
-  TripPlanResponse,
   TripRevisionRequest,
   SavedTripDetail,
   SavedTripSummary,
   UserPreferences,
   TripProgressResponse,
-  TransportationRequest,
-  TransportationResponse,
   WaitingInputPayload
 } from '@/types'
 import type { PlannerChatMessage, PlannerChatResponse } from '@/types'
@@ -30,6 +28,14 @@ export const apiClient = axios.create({
     'Content-Type': 'application/json'
   }
 })
+
+// 手动操作无需模型解析，后端统一核验游玩顺序、参考耗时和预算。
+export async function previewManualRevision(tripId: string, baseVersion: number, operations: ManualOperation[]): Promise<TripPlan> {
+  const response = await apiClient.post<TripPlan>(`/api/library/trips/${tripId}/revision-preview`, {
+    base_version: baseVersion, operations
+  })
+  return response.data
+}
 
 export async function sendPlannerMessage(
   messages: PlannerChatMessage[],
@@ -71,19 +77,6 @@ apiClient.interceptors.response.use(
   }
 )
 
-/**
- * 生成旅行计划
- */
-export async function generateTripPlan(formData: TripFormData): Promise<TripPlanResponse> {
-  try {
-    const response = await apiClient.post<TripPlanResponse>('/api/trip/plan', formData)
-    return response.data
-  } catch (error: any) {
-    console.error('生成旅行计划失败:', error)
-    throw new Error(error.response?.data?.detail || error.message || '生成旅行计划失败')
-  }
-}
-
 async function createPlanningJob(formData: TripFormData): Promise<PlanningJobResponse> {
   return submitTask('/api/trip/jobs',formData)
 }
@@ -93,25 +86,21 @@ async function createRevisionJob(request: TripRevisionRequest): Promise<Planning
 }
 
 async function submitTask(url:string,payload:unknown):Promise<PlanningJobResponse> {
-  // Keep only a hash + random submission token in storage, not private request bodies.
+  // 浏览器只保存哈希和随机提交令牌，不保存私密请求正文。
   const text=JSON.stringify(payload); let hash=2166136261, second=5381
   for(let i=0;i<text.length;i++){hash=Math.imul(hash^text.charCodeAt(i),16777619);second=Math.imul(second,33)^text.charCodeAt(i)}
   const storageKey=`tripmind.submit.${url}.${hash>>>0}.${second>>>0}.${text.length}`
   let key=''
-  try {const saved=JSON.parse(sessionStorage.getItem(storageKey)||'null');if(saved&&Date.now()-saved.at<86400000)key=saved.key}catch{/* Storage is optional. */}
+  try {const saved=JSON.parse(sessionStorage.getItem(storageKey)||'null');if(saved&&Date.now()-saved.at<86400000)key=saved.key}catch{/* 浏览器存储不可用时可以跳过。 */}
   if(!key)key=Array.from(crypto.getRandomValues(new Uint8Array(16)),n=>n.toString(16).padStart(2,'0')).join('')
-  try{sessionStorage.setItem(storageKey,JSON.stringify({key,at:Date.now()}))}catch{/* Memory-only request still works. */}
+  try{sessionStorage.setItem(storageKey,JSON.stringify({key,at:Date.now()}))}catch{/* 仅使用内存记录也能正常提交请求。 */}
   const response=await apiClient.post<PlanningJobResponse>(url,payload,{headers:{'Idempotency-Key':key}})
-  try{sessionStorage.removeItem(storageKey)}catch{/* No private payload was stored. */}
+  try{sessionStorage.removeItem(storageKey)}catch{/* 此处没有保存私密请求内容。 */}
   return response.data
 }
 
 export async function cancelPlanningJob(jobId:string):Promise<PlanningJobResponse> {
   return (await apiClient.post(`/api/trip/jobs/${jobId}/cancel`)).data
-}
-
-export async function getJobDiagnostics(jobId:string) {
-  return (await apiClient.get(`/api/trip/jobs/${jobId}/diagnostics`)).data
 }
 
 // 查询任务状态（含 waiting_input 载荷）——恢复监听与决策卡片拉详情共用
@@ -376,32 +365,6 @@ export async function updateTripProgress(
   return response.data
 }
 
-/**
- * 健康检查
- */
-export async function healthCheck(): Promise<any> {
-  try {
-    const response = await apiClient.get('/health')
-    return response.data
-  } catch (error: any) {
-    console.error('健康检查失败:', error)
-    throw new Error(error.message || '健康检查失败')
-  }
-}
-
-/**
- * 查询通勤费用
- */
-export async function queryTransportation(request: TransportationRequest): Promise<TransportationResponse> {
-  try {
-    const response = await apiClient.post<TransportationResponse>('/api/trip/transportation', request)
-    return response.data
-  } catch (error: any) {
-    console.error('查询通勤费用失败:', error)
-    throw new Error(error.response?.data?.detail || error.message || '查询通勤费用失败')
-  }
-}
-
 // ---------------------------------------------------------------------------
 // 攻略导入（提交后同步解析，单篇一般 1 分钟内；超时给足 5 分钟）
 // ---------------------------------------------------------------------------
@@ -418,11 +381,6 @@ export async function parseGuideSource(payload: GuideSourcePayload): Promise<Gui
 
 export async function listGuideSources(): Promise<GuideSourceRecord[]> {
   const response = await apiClient.get<GuideSourceRecord[]>('/api/guide-sources')
-  return response.data
-}
-
-export async function getGuideSource(sourceId: string): Promise<GuideSourceRecord> {
-  const response = await apiClient.get<GuideSourceRecord>(`/api/guide-sources/${sourceId}`)
   return response.data
 }
 

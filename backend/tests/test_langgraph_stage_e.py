@@ -31,7 +31,7 @@ _BUDGET_LIMIT = 1000
 def _request(accommodation: str = "豪华酒店") -> TripRequest:
     start = (date.today() + timedelta(days=30)).isoformat()
     return TripRequest(
-        destination_only=False,  # Legacy cross-city fixture.
+        destination_only=False,  # 旧版跨城行程测试数据。
         origin_city="上海",
         city="北京",
         start_date=start,
@@ -216,7 +216,7 @@ class StageETestCase(unittest.TestCase):
         # 无 Checkpointer 时保持旧行为：不 interrupt，直接完成（预算问题留给 finalize 复核）
         self.assertEqual(plan.budget.total, 2000)
 
-    # -- Worker / 任务状态层 -------------------------------------------------
+    # -- 任务执行器 / 任务状态层 -------------------------------------------------
 
     def test_worker_marks_waiting_input(self):
         publish_fixture(

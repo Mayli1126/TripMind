@@ -19,7 +19,7 @@ const emit=defineEmits<{state:[PlanningJobResponse]}>()
 const loaded=ref<PlanningJobResponse|null>(null),busy=ref(false),error=ref('')
 const state=computed(()=>props.job || loaded.value)
 const terminal=computed(()=>['completed','failed','cancelled'].includes(state.value?.status || ''))
-const labels:Record<string,string>={llm:'模型',map_mcp:'地图工具',map_http:'地点查询',map_route:'道路路线',cache:'缓存',runtime:'执行器',workflow:'工作流'}
+const labels:Record<string,string>={llm:'模型',agent_tool:'原生工具执行',map_mcp:'地图工具',map_http:'地点查询',map_route:'道路路线',cache:'缓存',runtime:'执行器',workflow:'工作流'}
 watch(()=>props.jobId,()=>{loaded.value=null;error.value=''})
 async function refresh(){const id=props.jobId;busy.value=true;try{const job=await getPlanningJob(id);if(id===props.jobId){loaded.value=job;emit('state',job)}}catch{error.value='暂时无法读取运行详情'}finally{busy.value=false}}
 function loadOnOpen(event:Event){if((event.target as HTMLDetailsElement).open)void refresh()}

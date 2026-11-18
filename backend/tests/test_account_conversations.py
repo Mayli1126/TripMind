@@ -1,4 +1,4 @@
-"""Small offline regressions for the new user-facing workflows; temporary DB only."""
+"""针对新增用户流程的小规模离线回归，仅使用临时数据库。"""
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase, mock

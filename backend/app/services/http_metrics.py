@@ -1,4 +1,4 @@
-"""Bounded, thread-safe process counters; never retain request contents or IDs."""
+"""有容量限制且线程安全的进程计数器，不保留请求内容或请求标识。"""
 from copy import deepcopy
 from threading import Lock
 

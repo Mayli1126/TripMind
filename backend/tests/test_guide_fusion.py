@@ -65,7 +65,7 @@ class _StubLLM:
 
 
 # ---------------------------------------------------------------------------
-# CandidatePool
+# 候选池
 # ---------------------------------------------------------------------------
 
 class CandidatePoolTestCase(TestCase):
@@ -129,7 +129,7 @@ class CandidatePoolTestCase(TestCase):
 
     def test_fact_status_only_upgrades(self):
         pool = CandidatePool()
-        pool.add_or_merge(_candidate("颐和园"))  # unverified
+        pool.add_or_merge(_candidate("颐和园"))  # 未核验
         cid, did_merge = pool.add_or_merge(_candidate("颐和园", poi_id="B000A2"))
         self.assertTrue(did_merge)
         place = pool.get(cid)
@@ -157,7 +157,7 @@ class CandidatePoolTestCase(TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Provider
+# 上游提供方
 # ---------------------------------------------------------------------------
 
 class ProviderTestCase(TestCase):
@@ -491,7 +491,7 @@ class GuideStoreAndApiTestCase(TestCase):
         result.candidates[0].candidate_id = 'new-parser-id'
         saved = self.store.save_result(record.id, result, parse_token=token)
         self.assertEqual(saved.result.candidates[0].user_choice, 'excluded')
-        # Provider failure must not erase a previously successful result.
+        # 上游调用失败不能清除之前的成功结果。
         token = self.store.begin_parse(record.id)
         saved = self.store.save_result(record.id, GuideParseResult(source_id=record.id, parse_status='failed'), parse_token=token)
         self.assertEqual(saved.result.candidates[0].user_choice, 'excluded')
@@ -524,7 +524,6 @@ class GuideStoreAndApiTestCase(TestCase):
         self.assertEqual(len(self.store.list_records()), 1)
 
         # 事实表已写入
-        import sqlite3
         with self.store._connection() as connection:
             rows = connection.execute(
                 "SELECT fact_type, subject, claim_json FROM guide_facts WHERE source_id=?", (record.id,)
@@ -581,7 +580,6 @@ class GuideStoreAndApiTestCase(TestCase):
         self.assertTrue(guide_routes.delete_guide_source(record.id))
         self.assertIsNone(self.store.get_record(record.id))
         # 事实表级联清除
-        import sqlite3
         with self.store._connection() as connection:
             rows = connection.execute(
                 "SELECT COUNT(*) AS n FROM guide_facts WHERE source_id=?", (record.id,)

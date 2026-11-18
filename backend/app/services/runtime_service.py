@@ -1,4 +1,4 @@
-"""Planning readiness is distinct from HTTP process liveness."""
+"""规划功能就绪与 HTTP 进程存活是两个独立状态。"""
 
 import os
 import time

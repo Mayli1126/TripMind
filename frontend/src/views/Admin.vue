@@ -3,6 +3,21 @@
     <p v-if="error" class="admin-error">{{ error }}</p>
     <div class="admin-stats"><article v-for="stat in stats" :key="stat.label"><span>{{ stat.label }}</span><strong>{{ stat.count }}</strong></article></div>
     <section class="runtime-card"><div class="runtime-heading"><div><span class="runtime-light" :class="{ ready: runtime?.ready }" /><strong>{{ runtime?.ready ? '规划服务已就绪' : '规划服务尚未就绪' }}</strong></div><button :disabled="warming || loading" @click="warmRuntime">{{ warming ? '正在预热地图会话…' : '重新预热地图工具' }}</button></div><div v-if="runtime" class="runtime-facts"><span>地图会话 {{ runtime.mcp.ready_sessions }}/{{ runtime.mcp.pool_size }}</span><span>模型配置 {{ runtime.llm_configured ? '已填写，调用时验证' : '未填写' }}</span><span>{{ runtime.redis_enabled ? `规划 Worker ${runtime.worker.running ? '运行中' : '未启动'}` : '内存任务队列' }}</span><span>工具依赖：离线缓存加载</span></div><p v-if="runtime?.error">{{ runtime.error }}</p><p v-if="runtimeError">{{ runtimeError }}</p><small>首次部署或更换环境，请先在后端运行 <code>python -m app.services.mcp_setup prepare</code>。这里重新预热只读缓存，不会触发依赖下载或调用模型。</small></section>
+    <section class="runtime-card search-quota-card">
+      <div class="runtime-heading"><strong>今日搜索服务额度</strong><span>{{ searchQuota?.date }} · 北京时间每日重置</span></div>
+      <p v-if="searchQuotaError" class="admin-error">{{ searchQuotaError }}</p>
+      <template v-if="searchQuota">
+        <div class="search-quota-grid">
+          <article v-for="provider in searchQuota.providers" :key="provider.id">
+            <strong>{{ provider.label }}</strong>
+            <p>剩余 <b>{{ provider.remaining }}</b> / {{ provider.daily_limit }} 次</p>
+            <small>今日已用 {{ provider.used }} 次 · {{ !provider.enabled ? '已关闭' : !searchQuota.configured ? '未配置 Key' : searchQuota.active_provider === provider.id ? '当前优先使用' : '备用' }}</small>
+          </article>
+        </div>
+        <p>{{ searchQuota.active_provider === 'standard' ? '高性能版当日上限已用完，当前使用普通版。' : searchQuota.active_provider ? '优先使用高性能版，用满后自动切换普通版。' : '今日可用搜索次数已用完或服务已关闭。' }}</p>
+        <small>这里是本项目记录，不是百度账号余额；失败请求保守计数，缓存命中不扣次数。普通版模型费用另算。</small>
+      </template>
+    </section>
     <div class="admin-tabs"><button v-for="tab in tabs" :key="tab.key" :class="{ active: section === tab.key }" @click="section = tab.key">{{ tab.label }}</button></div>
     <div class="admin-table-wrap">
       <table v-if="section === 'users'"><thead><tr><th>用户</th><th>身份</th><th>行程</th><th>攻略</th><th>注册时间</th></tr></thead><tbody><tr v-for="user in data.users" :key="user.id"><td>{{ user.username }}</td><td>{{ user.role === 'admin' ? '管理员' : '普通用户' }}</td><td>{{ user.trip_count }}</td><td>{{ user.guide_count }}</td><td>{{ formatDate(user.created_at) }}</td></tr></tbody></table>
@@ -25,6 +40,7 @@ interface GuideRow { id: string; title: string; username: string; parse_status: 
 interface JobRow { id: string; username: string; created_at: number }
 interface Overview { users: UserRow[]; trips: TripRow[]; guides: GuideRow[]; jobs: JobRow[] }
 interface RuntimeState { ready: boolean; phase: string; error: string; llm_configured: boolean; redis_enabled: boolean; mcp: { ready_sessions: number; pool_size: number }; worker: { running: boolean } }
+interface SearchQuota { date: string; configured: boolean; active_provider: string | null; providers: { id: string; label: string; daily_limit: number; used: number; remaining: number; enabled: boolean }[] }
 type Section = keyof Overview
 const data = ref<Overview>({ users: [], trips: [], guides: [], jobs: [] })
 const section = ref<Section>('users')
@@ -32,6 +48,8 @@ const loading = ref(false)
 const error = ref('')
 const runtime = ref<RuntimeState | null>(null)
 const runtimeError = ref('')
+const searchQuota = ref<SearchQuota | null>(null)
+const searchQuotaError = ref('')
 const warming = ref(false)
 const detail = ref('')
 const detailTitle = ref('')
@@ -45,7 +63,13 @@ async function load() {
   try { data.value = (await apiClient.get<Overview>('/api/admin/overview')).data }
   catch (cause: any) { error.value = cause.response?.data?.detail || '暂时无法读取管理数据。' }
   finally { loading.value = false }
-  await loadRuntime()
+  await Promise.all([loadRuntime(), loadSearchQuota()])
+}
+
+async function loadSearchQuota() {
+  // 管理页读取本地计数，不主动探测百度，刷新不会消耗搜索额度。
+  try { searchQuota.value = (await apiClient.get<SearchQuota>('/api/admin/search/quota')).data; searchQuotaError.value = '' }
+  catch { searchQuotaError.value = '暂时无法读取今日搜索额度。' }
 }
 
 async function loadRuntime() {
@@ -78,6 +102,11 @@ onMounted(load)
 </script>
 
 <style scoped>
+.search-quota-card { margin-top: 18px; }
+.search-quota-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin: 18px 0; }
+.search-quota-grid article { padding: 16px; border: 1px solid #e3ecef; border-radius: 12px; }
+.search-quota-grid b { font-size: 24px; color: #305663; }
+
 .runtime-card { margin: 20px 0 30px; padding: 22px; border: 1px solid #e2edf0; border-radius: 20px; background: #fff; }
 .runtime-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .runtime-heading > div { display: flex; align-items: center; gap: 9px; color: #557d8b; font-size: 13px; }

@@ -355,7 +355,7 @@ class PatchCandidateDirectTestCase(unittest.TestCase):
         with mock.patch("app.services.patch_service._search_poi", return_value=poi) as fake_search:
             new_plan, issues = apply_plan_patch(self._patch_plan(), patch, [unverified])
         self.assertEqual(issues, [])
-        fake_search.assert_called_once()  # unverified 候选无坐标，必须回退校准
+        fake_search.assert_called_once()  # 未核验 候选无坐标，必须回退校准
         self.assertEqual(new_plan.days[0].attractions[-1].poi_id, "B000F2")
 
     def test_both_fail_rejected(self):

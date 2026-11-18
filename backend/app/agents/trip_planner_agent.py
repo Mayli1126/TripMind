@@ -61,7 +61,8 @@ class MultiAgentTripPlanner:
         print("🔄 开始初始化多智能体旅行规划系统...")
 
         try:
-            settings = get_settings()
+            # 初始化前校验配置，不保留后续未使用的局部副本。
+            get_settings()
             self.llm = get_llm()
             # 同一个 Planner 实例不会同时服务两份旅行，避免 Agent 历史和 MCP 会话串线。
             self._request_lock = Lock()
@@ -80,7 +81,8 @@ class MultiAgentTripPlanner:
             self.attraction_agent = SimpleAgent(
                 name="景点搜索专家",
                 llm=create_llm(),
-                system_prompt=ATTRACTION_AGENT_PROMPT
+                system_prompt=ATTRACTION_AGENT_PROMPT,
+                allowed_tools={"amap_maps_text_search", "amap_maps_search_detail"}, require_tool=True,
             )
             self.attraction_agent.add_tool(self.attraction_amap_tool)
 
@@ -89,7 +91,8 @@ class MultiAgentTripPlanner:
             self.weather_agent = SimpleAgent(
                 name="天气查询专家",
                 llm=create_llm(),
-                system_prompt=WEATHER_AGENT_PROMPT
+                system_prompt=WEATHER_AGENT_PROMPT,
+                allowed_tools={"amap_maps_weather"}, require_tool=True,
             )
             self.weather_agent.add_tool(self.weather_amap_tool)
 
@@ -98,7 +101,8 @@ class MultiAgentTripPlanner:
             self.hotel_agent = SimpleAgent(
                 name="酒店推荐专家",
                 llm=create_llm(),
-                system_prompt=HOTEL_AGENT_PROMPT
+                system_prompt=HOTEL_AGENT_PROMPT,
+                allowed_tools={"amap_maps_text_search", "amap_maps_search_detail"}, require_tool=True,
             )
             self.hotel_agent.add_tool(self.hotel_amap_tool)
 
@@ -107,7 +111,9 @@ class MultiAgentTripPlanner:
             self.transport_agent = SimpleAgent(
                 name="通勤查询专家",
                 llm=create_llm(),
-                system_prompt=TRANSPORT_AGENT_PROMPT
+                system_prompt=TRANSPORT_AGENT_PROMPT,
+                allowed_tools={"amap_maps_direction_transit_integrated_by_address", "amap_maps_geo",
+                               "amap_maps_direction_transit_integrated"}, require_tool=True,
             )
             self.transport_agent.add_tool(self.transport_amap_tool)
 
@@ -153,10 +159,10 @@ class MultiAgentTripPlanner:
         """
         使用多智能体协作生成旅行计划
 
-        Args:
+        参数：
             request: 旅行请求
 
-        Returns:
+        返回：
             旅行计划
         """
         request_lock = getattr(self, "_request_lock", None)
@@ -447,7 +453,8 @@ class MultiAgentTripPlanner:
     ) -> TripPlan:
         """按自然语言指令局部修改计划，并重新执行质量与预算校验。"""
         self.report_progress(progress_callback, 10, "understanding", "正在理解修改要求")
-        current_json = current_plan.model_dump_json(exclude_none=True)
+        from ..services.revision_outcome import revision_context, revision_errors, reject_revision, has_plan_changes, mark_revision_ready
+        current_json = revision_context(current_plan)
         prompt = f"""请根据用户的修改要求调整现有旅行计划，并只返回完整JSON。
 
 用户修改要求：{instruction}
@@ -456,22 +463,23 @@ class MultiAgentTripPlanner:
 - 目的地：{request.city}
 - 日期：{request.start_date} 至 {request.end_date}，共 {request.travel_days} 天
 - 出行人数：{request.travelers} 人，{request.rooms} 间房
-- 每天必须至少包含1个景点和 breakfast、lunch、dinner 三餐
+- 每天必须至少包含1个景点；只规划游玩与交通，meals返回空列表
 - 不要编造新的实时价格、评分、开放时间或交通班次
 - 只修改与用户要求相关的部分，其他内容尽量保持不变
 
 当前计划：
-{current_json[:14000]}
+{current_json}
 """
         try:
             self.report_progress(progress_callback, 35, "revising", "Planner 正在调整相关行程")
             response = self.run_agent_fresh(self.planner_agent, prompt)
             self.report_progress(progress_callback, 75, "validating", "正在校验修改后的计划")
             revised = self.parse_response(response, request)
-            if revised.is_fallback or self.needs_repair(revised, request):
-                preserved = current_plan.model_copy(deep=True)
-                preserved.warnings.append("本次自然语言修改未通过结构校验，已保留原计划。")
-                return preserved
+            errors = revision_errors(revised, request)
+            if errors:
+                return reject_revision(current_plan, "本次自然语言修改未通过结构校验，已保留原计划：" + "；".join(errors))
+            if not has_plan_changes(current_plan, revised):
+                return reject_revision(current_plan, "本次修改未产生实际变化，已保留原计划。", unchanged=True)
 
             intercity_cost = 0
             if current_plan.budget and request.travelers:
@@ -482,27 +490,25 @@ class MultiAgentTripPlanner:
             revised.planning_iterations = 2
             revised.warnings.append(f"已根据修改要求更新：{instruction}")
             self.report_progress(progress_callback, 92, "optimizing", "正在重新计算预算与路线")
-            return trip_quality_service.finalize(
+            mark_revision_ready(revised)
+            return trip_quality_service.finalize_revision(
                 revised,
                 request,
                 intercity_cost_per_person=intercity_cost,
-                resolve_routes=True,
             )
         except Exception as exc:
-            preserved = current_plan.model_copy(deep=True)
-            preserved.warnings.append(f"修改失败，已保留原计划：{exc}")
-            return preserved
+            return reject_revision(current_plan, f"修改失败，已保留原计划：{self.friendly_error(exc)}")
     
     def query_transportation(self, origin_city: str, destination_city: str, date: str = None) -> list:
         """
         查询通勤费用和交通方式
 
-        Args:
+        参数：
             origin_city: 出发城市
             destination_city: 目的城市
             date: 出发日期
 
-        Returns:
+        返回：
             交通方式选项列表
         """
         try:
@@ -535,40 +541,13 @@ class MultiAgentTripPlanner:
             return []
     
     def build_attraction_query(self, request: TripRequest) -> str:
-        """构建景点搜索查询 - 支持多关键词批量搜索。
-
-        当用户有多个偏好时，为每个偏好生成独立的工具调用，
-        让 Agent 并行搜索后在 Python 层去重合并，提升景点覆盖度。
-        """
-        base_keywords = ["景点", "旅游"]
-        if request.preferences:
-            # 每个偏好作为一个独立搜索关键词
-            keywords_list = list(request.preferences)
-        else:
-            keywords_list = base_keywords
-
-        tool_calls = []
-        for kw in keywords_list[:3]:  # 最多 3 个关键词，避免过度搜索
-            tool_calls.append(
-                f"[TOOL_CALL:amap_maps_text_search:keywords={kw},city={request.city}]"
-            )
-
-        query = (
-            f"请使用amap_maps_text_search工具搜索{request.city}的相关景点。"
-            f"需要搜索以下关键词，请依次调用工具：{', '.join(keywords_list[:3])}\n"
-            + "\n".join(tool_calls)
+        """只描述检索目标，由原生工具契约提供参数格式，不在用户消息中伪造调用。"""
+        keywords = list(request.preferences)[:3] if request.preferences else ["景点", "旅游"]
+        return (
+            f"请通过原生地点检索工具查询{request.city}的相关景点。"
+            f"分别搜索这些关键词：{', '.join(keywords)}。"
+            "使用工具定义中的城市与关键词字段；根据真实结果合并重复地点，不能编造。"
         )
-        return query
-        """构建景点搜索查询 - 直接包含工具调用"""
-        keywords = ""
-        if request.preferences:
-            keywords = " ".join(request.preferences)
-        else:
-            keywords = "景点"
-
-        # 直接返回工具调用格式
-        query = f"请使用amap_maps_text_search工具搜索{request.city}的{keywords}相关景点。\n[TOOL_CALL:amap_maps_text_search:keywords={keywords},city={request.city}]"
-        return query
 
     def build_planner_query(self, request: TripRequest, attractions: str, weather: str, hotels: str = "", transportation_info: str = "") -> str:
         """构建行程规划查询"""
@@ -611,12 +590,12 @@ class MultiAgentTripPlanner:
 {hotels}{transport_text}
 
 **要求:**
-1. 每天至少安排3个景区或游玩打卡点；时间紧张时选择同片区、短时长地点，当前节奏为{request.pace}
-2. 每天必须包含早中晚三餐
+1. 每天按游览和通勤时间安排地点，大景区可以独占一天；时间紧张时减少地点、不凑数量，当前节奏为{request.pace}
+2. 只规划游玩与必要交通，不安排三餐，meals返回空列表
 3. 每天推荐一个具体的酒店(从酒店信息中选择)
 4. {'仅安排目的地内游玩，第一天不安排跨城交通、机场车站接驳，不扣除赶车时间' if request.destination_only else '第一天先安排跨城交通与抵达接驳，使用抵达后的剩余时间'}
 5. {'最后一天仍为目的地内游玩日，不编造返程时刻或车票' if request.destination_only else '如提供返程时刻，活动须在前往返程车站之前结束'}
-6. {'预算仅含当地门票、餐饮、住宿和市内交通，不包含往返目的地车票' if request.destination_only else '如果有通勤交通信息，在预算中包含通勤费用'}
+6. {'预算仅含当地门票、住宿和市内交通，不包含往返目的地车票' if request.destination_only else '如果有通勤交通信息，在预算中包含通勤费用'}
 7. 返回完整的JSON格式数据
 8. 景点的经纬度坐标要真实准确
 """
@@ -637,10 +616,6 @@ class MultiAgentTripPlanner:
             and day.date == (start + timedelta(days=index)).isoformat()
             for index, day in enumerate(plan.days)
         )
-        meals_are_complete = all(
-            {"breakfast", "lunch", "dinner"}.issubset({meal.type for meal in day.meals})
-            for day in plan.days
-        )
         attraction_keys = [
             f"poi:{item.poi_id}" if item.poi_id else f"name:{''.join(item.name.lower().split())}"
             for day in plan.days for item in day.attractions
@@ -649,7 +624,6 @@ class MultiAgentTripPlanner:
             plan.is_fallback
             or len(plan.days) != request.travel_days
             or not dates_are_valid
-            or not meals_are_complete
             or any(not day.attractions for day in plan.days)
             or any(len(day.attractions) < self._minimum_attractions(request.pace) for day in plan.days)
             or len(attraction_keys) != len(set(attraction_keys))
@@ -657,7 +631,7 @@ class MultiAgentTripPlanner:
 
     @staticmethod
     def _minimum_attractions(pace: str) -> int:
-        return 3
+        return 1
 
     def repair_plan(self, request: TripRequest, previous_response: str) -> TripPlan:
         repair_prompt = f"""上一版旅行计划未通过结构校验。请修复后只返回完整JSON，不要解释。
@@ -666,14 +640,13 @@ class MultiAgentTripPlanner:
 - 城市：{request.city}
 - 日期：{request.start_date} 至 {request.end_date}，共{request.travel_days}天
 - days必须恰好包含{request.travel_days}项，day_index从0连续递增
-- 每天至少3个景区或游玩打卡点，并包含breakfast、lunch、dinner三餐
+- 每天安排真实可游览地点，只规划游玩与交通，meals返回空列表
 - 首日必须先扣除跨城交通和抵达接驳；不得出现从出发城市早上出发、一小时后已在异地景点游玩的情况
-- 首日时间紧张时，使用同片区、30-90分钟的轻量打卡点凑足3个，不要伪造不可能的精确时间
+- 首日时间紧张时，减少安排，优先同片区地点，不凑数量，不要伪造不可能的精确时间
 - 对于某些面积大的景区，游玩时间可以拉长但要考虑时间安排，比如爬泰山这种就可以玩一天
 - 所有日期的景点全局去重，同一POI或同名景点只能出现一次
 - 每天使用不同主题，至少覆盖历史文化、自然/城市风光、休闲体验或当地美食中的多个类别
-- 午餐和晚餐不要跨天重复同一家餐厅
-- 景点数量和游览时长必须能在08:30至21:30之间合理完成
+- 只提供每日顺序与建议分钟数，不生成具体游玩起止钟点；按节奏参考总时长提示偏紧或偏空
 - 所有经纬度、金额和温度使用数字类型
 - 保留能够确认的数据，不要新增无法从上下文确认的实时事实
 
@@ -695,7 +668,6 @@ class MultiAgentTripPlanner:
         score = 0 if plan.is_fallback else 100
         score -= abs(len(plan.days) - request.travel_days) * 20
         score += sum(5 for day in plan.days if day.attractions)
-        score += sum(3 for day in plan.days if len(day.meals) >= 3)
         return score
     
     # 兼容旧调用名，解析实现已独立，不再依赖 Agent 初始化。

@@ -1,14 +1,16 @@
-"""Price provenance, never interpret generic map consumption as a ticket or room quote."""
+"""管理价格来源，不能把地图通用消费水平解释为门票或房费报价。"""
 from .attraction_hours_kb import ATTRACTION_HOURS_KB
 
 
 def enrich_amap_costs(plan):
-    """Bounded cached POI lookups during generation only; never on history reads."""
+    """仅在生成期间进行有上限的缓存地点检索，读取历史时不查询。"""
     from concurrent.futures import ThreadPoolExecutor
     from .amap_service import AmapService
     targets = {}
     for day in plan.days:
         for item in [*day.attractions, *([day.hotel] if day.hotel else [])]:
+            if getattr(item, 'price_policy', 'auto') == 'budget_only':
+                continue
             if item.amap_average_cost is None:
                 targets.setdefault(item.name, []).append(item)
     def lookup(pair):
@@ -23,7 +25,7 @@ def enrich_amap_costs(plan):
                     continue
                 item.amap_average_cost = poi.amap_average_cost
         except Exception:
-            # No returned price is not free. Existing provider guard records failures.
+            # 未返回价格不代表免费，调用失败由现有上游限流器记录。
             return
     with ThreadPoolExecutor(max_workers=3) as pool:
         list(pool.map(lookup, list(targets.items())[:24]))
@@ -35,7 +37,7 @@ def attraction_cost(item):
 
 
 def enrich_llm_estimates(plan, request):
-    """One optional batch for missing prices. Model knowledge is not a verified quote."""
+    """可选地批量补充一次缺失价格，模型知识不属于已核验报价。"""
     import json
     import math
     from ..infrastructure.task_trace import emit
@@ -44,7 +46,7 @@ def enrich_llm_estimates(plan, request):
         for a in day.attractions:
             if a.ticket_price is None and a.amap_average_cost is None:
                 targets.append((a, 'ticket', day.date))
-        if day.hotel and day.hotel.amap_average_cost is None and day.hotel.price_source != 'llm_estimate':
+        if day.hotel and day.hotel.price_policy != 'budget_only' and day.hotel.amap_average_cost is None and day.hotel.price_source != 'llm_estimate':
             targets.append((day.hotel, 'hotel', day.date))
     targets = targets[:40]
     if not targets:
@@ -89,7 +91,7 @@ def enrich_llm_estimates(plan, request):
 
 
 def apply_price_references(plan):
-    # Exact city+name only: a fuzzy child/parent match may have a different ticket.
+    # 只按城市与名称精确匹配，模糊匹配到父景区或子景点可能对应不同票价。
     records = ATTRACTION_HOURS_KB.get(plan.city.removesuffix('市'), {})
     for day in plan.days:
         for attraction in day.attractions:
@@ -111,7 +113,7 @@ def apply_price_references(plan):
             day.hotel.price_source = 'amap_average' if day.hotel.amap_average_cost is not None else 'estimate'
             day.hotel.price_note = ('高德人均消费，不是每间每晚房价；未核验入住日期与房型' if day.hotel.amap_average_cost is not None
                                     else '按住宿档次预留预算，未核验入住日期、房型、税费和库存，不是该酒店报价')
-            # The old pipeline populated this from a fixed tier amount, not a provider.
+            # 旧管线使用固定档次金额填充此字段，并非来自上游报价。
             day.hotel.price_range = ''
     if plan.budget:
         included = [a for d in plan.days for i, a in enumerate(d.attractions)

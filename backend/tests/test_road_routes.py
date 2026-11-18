@@ -80,7 +80,7 @@ class RoadRouteTests(TestCase):
         self.assertEqual(len(legs), 2)
         self.assertTrue(all(item.duration_minutes == 41 for item in legs))
         budget = TripQualityService().calculate_budget(plan, request, 50)
-        self.assertEqual(budget.local_transportation, 100)  # 2 legs x 25 x 2 cars
+        self.assertEqual(budget.local_transportation, 100)  # 两段接驳，每段二十五元，共两辆车。
         self.assertEqual(budget.intercity_transportation, 500)
         self.assertIn('逐段', budget.calculation_note)
 
@@ -107,11 +107,11 @@ class RoadRouteTests(TestCase):
             affected_day_indexes=[1], explanation='晚出发')
         resolver = MagicMock()
         resolver.resolve.return_value = RouteLeg(mode='transit', duration_minutes=20, cost=5)
-        with patch('app.graphs.revision_graph._get_planner', return_value=MagicMock()), \
+        with patch('app.graphs.revision_graph.MultiAgentTripPlanner.revise_trip', side_effect=AssertionError('不能自动整份重生成')), \
              patch('app.services.road_route_service.RoadRouteResolver', return_value=resolver):
             result = finalize_revision_node({'request': request, 'patched_plan': plan,
                 'plan_patch': instruction}, {})['result']
         self.assertEqual(result.budget.intercity_transportation, 200)
         self.assertEqual(result.days[0].model_dump(), before)
-        # An untouched legacy day still has its reserve, rather than disappearing from budget.
+        # 未修改的旧行程日期仍保留交通预留费用，不能从预算中消失。
         self.assertGreaterEqual(result.budget.local_transportation, 100)

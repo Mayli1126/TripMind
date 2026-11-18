@@ -13,7 +13,7 @@ import re
 from typing import Optional
 
 from ..infrastructure.llm_client import LLMClient
-from ..models.candidate import CandidateCategory, CandidatePlace
+from ..models.candidate import CandidatePlace
 from ..models.guide import ExtractedPlace, GuideDocument, GuideFact
 from .candidate_pool_service import make_candidate_id
 

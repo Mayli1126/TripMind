@@ -1,4 +1,4 @@
-"""Turn a short conversation into a validated TripRequest, without planning twice."""
+"""将简短对话转为校验通过的 TripRequest，避免重复规划。"""
 
 import json
 import logging
@@ -23,13 +23,13 @@ logger = logging.getLogger(__name__)
 
 
 class ChatResponseError(ValueError):
-    """The model did not return a usable demand update after one format retry."""
+    """格式修复重试一次后，模型仍未返回可用的需求更新。"""
 
 
 def parse_response(raw: str) -> dict:
     if not isinstance(raw, str) or not raw.strip():
         raise ChatResponseError('empty_response')
-    # Accept a JSON object surrounded by a code fence or short explanation.
+    # 允许 JSON 对象前后包含代码围栏或简短说明。
     start = raw.find('{')
     if start < 0:
         raise ChatResponseError('missing_json')
@@ -59,7 +59,7 @@ def _extract_response(messages: list[dict]) -> dict:
         try:
             return parse_response(raw)
         except ChatResponseError as exc:
-            # Fixed reason codes only: never record model text, user text, keys or provider bodies.
+            # 只记录固定原因码，不记录模型文本、用户文本、密钥或上游响应正文。
             logger.warning('planner_chat invalid_response reason=%s attempt=%d chars=%d',
                            str(exc), attempt + 1, len(raw) if isinstance(raw, str) else 0)
             if attempt:
@@ -113,7 +113,7 @@ ask_route_options 表示用户是否要比较方案；free_text_input 保留亲�
     draft['destination_only'] = True
     if draft.get('transportation') not in ('自驾', '公共交通'):
         draft['transportation'] = '公共交通'
-    # Derive calendar boundaries in code rather than trusting model arithmetic.
+    # 通过代码推导日期边界，不依赖模型进行日期运算。
     if draft.get("start_date"):
         try:
             first = date.fromisoformat(draft["start_date"])

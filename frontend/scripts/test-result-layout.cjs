@@ -1,4 +1,4 @@
-// Optional browser smoke test. Requires Playwright in NODE_PATH; no real accounts/API calls.
+// 可选的浏览器冒烟检查，需要 NODE_PATH 中可找到 Playwright，不使用真实账号或接口。
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')
@@ -15,7 +15,7 @@ async function main() {
       json: route.request().url().includes('/auth/me') ? { id: 'layout-fixture', username: 'preview', role: 'user' } : [],
       headers: { 'Access-Control-Allow-Origin': 'http://127.0.0.1:5175', 'Access-Control-Allow-Credentials': 'true' }
     }))
-    // Test map failure independently; deliberately do not consume a real map key or quota.
+    // 单独验证地图加载失败，不消耗真实地图密钥配额。
     let mapRequests = 0
     await page.route('**/webapi.amap.com/**', route => { mapRequests++; return route.abort() })
     const image = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="600" height="300"><rect width="600" height="300" fill="#b7d8ca"/><path d="M0 210 Q150 70 300 220T600 170V300H0" fill="#5f9984"/><circle cx="440" cy="65" r="30" fill="#f6e2aa"/></svg>')
@@ -144,7 +144,7 @@ async function main() {
     const overflow = await page.evaluate(() => ({ width: document.documentElement.scrollWidth, viewport: innerWidth,
       elements: [...document.querySelectorAll('body *')].filter(el => { const r = el.getBoundingClientRect(); return r.width && (r.right > innerWidth + 1 || r.left < -1) }).slice(0, 15).map(el => el.className) }))
     assert.ok(overflow.width <= overflow.viewport + 1, 'mobile horizontal overflow: ' + JSON.stringify(overflow))
-    // Result-page conversation stays in place, and confirmed changes refresh that page.
+    // 结果页对话保持在当前页面，确认修改后直接更新当前结果页。
     await page.setViewportSize({ width: 1440, height: 1000 })
     const fixtureRequest = { origin_city: '武汉', city: '青岛', start_date: plan.start_date, end_date: plan.end_date, travel_days: 2, transportation: 'high_speed_train', accommodation: '经济型酒店' }
     await page.evaluate(request => sessionStorage.setItem('tripRequest', JSON.stringify(request)), fixtureRequest)
@@ -178,7 +178,7 @@ async function main() {
       else if (url.pathname.startsWith('/api/library/trips')) json = saved
       await route.fulfill({ json, headers })
     })
-    // Reload only to hydrate the test request, not to generate a new itinerary.
+    // 重新加载仅用于恢复测试请求，不生成新行程。
     await page.reload()
     await page.locator('.assistant-nav').click()
     const panel = page.locator('.assistant-page.embedded')

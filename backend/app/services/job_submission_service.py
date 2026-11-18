@@ -1,4 +1,4 @@
-"""Account-scoped idempotent submission journal. Payloads are hashed, never stored here."""
+"""按账号隔离的幂等提交记录，只存请求哈希，不在此保存原始请求。"""
 import hashlib
 import json
 import time
@@ -58,7 +58,7 @@ def submit_once(request,kind,payload,create):
     if not may_create:
         raise HTTPException(409,'这次提交正在入队，请稍后重试；不会重复创建任务',headers={'Retry-After':'2'})
     try:
-        # Claim before publishing: even a fast worker cannot expose an unowned task.
+        # 先登记归属再发布，即使执行器很快也不会暴露无归属的任务。
         auth_service.claim('job',job_id,user_id)
         from .job_admission import submission_owner
         owner_token = submission_owner.set(user_id)

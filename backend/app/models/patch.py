@@ -6,7 +6,7 @@ Patch 校验失败时保留原版本，不产生半成品版本。
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -17,6 +17,7 @@ PatchOperationType = Literal[
     "move_place",       # 跨日/日内移动（target_stable_id + day_index + position）
     "reorder_day",      # 当日重排（day_index + ordered_stable_ids）
     "change_duration",  # 调整停留时长（target_stable_id + duration_minutes）
+    "update_description", # 修改景点介绍，不改动地点和坐标
     "change_start_time",# 调整出发时间（day_index + start_time）
     "change_pace",      # 调整节奏（day_index + pace）
     "update_transport", # 更新交通（day_index 或 target_stable_id + transport）
@@ -43,6 +44,7 @@ class PatchOperation(BaseModel):
     replacement_name: Optional[str] = Field(default=None, description="add/replace 时的地点名称")
     replacement_candidate_id: Optional[str] = Field(default=None, description="add/replace 时引用候选池")
     duration_minutes: Optional[int] = Field(default=None, ge=15, le=720)
+    description: Optional[str] = Field(default=None, max_length=5000)
     start_time: Optional[str] = Field(default=None, description="HH:MM")
     pace: Optional[DayPace] = None
     transport: Optional[str] = None
@@ -50,9 +52,13 @@ class PatchOperation(BaseModel):
 
     @model_validator(mode="after")
     def _check_required_fields(self) -> "PatchOperation":
-        needs_target = self.op in {"remove_place", "replace_place", "move_place", "change_duration"}
+        needs_target = self.op in {"remove_place", "replace_place", "move_place", "change_duration", "update_description"}
         if needs_target and not self.target_stable_id:
             raise ValueError(f"op={self.op} 需要 target_stable_id")
+        if self.op == "change_duration" and self.duration_minutes is None:
+            raise ValueError("调整时长需要 duration_minutes")
+        if self.op == "update_description" and self.description is None:
+            raise ValueError("修改介绍需要 description")
         if self.op == "reorder_day" and (self.day_index is None or not self.ordered_stable_ids):
             raise ValueError("op=reorder_day 需要 day_index 与 ordered_stable_ids")
         if self.op in {"add_place", "replace_place"} and not (
@@ -79,7 +85,21 @@ class PlanPatch(BaseModel):
 
     base_version: int = Field(..., ge=1)
     operations: list[PatchOperation] = Field(..., min_length=1)
-    affected_day_indexes: list[int] = Field(..., min_length=1)
+    affected_day_indexes: list[Annotated[int, Field(ge=0)]] = Field(..., min_length=1)
     required_research: list[RequiredResearch] = Field(default_factory=list)
     preserved_stable_ids: list[str] = Field(default_factory=list, description="不允许被触碰的活动 ID（第 1 节完成标准）")
     explanation: str = Field(..., description="面向用户的修改摘要，差异预览的标题")
+
+
+class ManualRevisionRequest(BaseModel):
+    """手动编辑只提交操作，原行程与受影响日期由服务端获取。"""
+
+    base_version: int = Field(..., ge=1)
+    operations: list[PatchOperation] = Field(..., min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def _manual_operations_only(self):
+        allowed = {"remove_place", "move_place", "reorder_day", "change_duration", "update_description"}
+        if any(op.op not in allowed for op in self.operations):
+            raise ValueError("手动编辑仅支持删除、移动、排序、时长和介绍修改")
+        return self

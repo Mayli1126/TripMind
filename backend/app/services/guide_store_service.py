@@ -106,7 +106,7 @@ class GuideStoreService:
         return record
 
     def begin_parse(self, source_id: str, expected_status: str | None = None) -> str:
-        """Reserve one parser per source across processes; no DB lock during provider calls."""
+        """跨进程为每个来源保留一个解析器，上游调用期间不持有数据库锁。"""
         token = uuid4().hex
         with self._connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -134,7 +134,7 @@ class GuideStoreService:
             if parse_token is None and lease:
                 raise ValueError('已有解析任务，回填必须携带任务标识')
             result = result.model_copy(deep=True)
-            # Keep the latest user choices, not the snapshot taken before a slow LLM call.
+            # 保留用户最新选择，不能使用慢模型调用前的过期快照覆盖。
             old_record = self._record_from_row(previous)
             if old_record.result and result.parse_status != 'parsed':
                 result = old_record.result.model_copy(deep=True)
@@ -189,7 +189,7 @@ class GuideStoreService:
         未知 candidate_id 静默跳过（候选可能已被合并/删除）。
         """
         with self._lock, self._connection() as connection:
-            # Read/merge/write under a database lock, not just this instance's Python lock.
+            # 在数据库锁内读取、合并和写入，不能只依赖当前 Python 实例锁。
             connection.execute('BEGIN IMMEDIATE')
             row = connection.execute('SELECT * FROM guide_sources WHERE id=?', (source_id,)).fetchone()
             record = self._record_from_row(row) if row else None

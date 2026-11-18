@@ -345,17 +345,17 @@ class PlanResponseParser:
 
         若全部失败则使用增强版备份计划
 
-        Args:
+        参数：
             response: Agent响应文本
             request: 原始请求
 
-        Returns:
+        返回：
             旅行计划
         """
         last_error = None
 
         # 尝试1: 原始提取 + 清理 + 解析
-        for attempt, do_clean in enumerate([False, True]):
+        for do_clean in (False, True):
             try:
                 json_str = self._extract_json(response)
                 if do_clean:

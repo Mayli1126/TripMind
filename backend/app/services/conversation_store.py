@@ -1,7 +1,4 @@
-"""Account-scoped conversation snapshots and explicit preference memories."""
-import json
-import time
-from uuid import uuid4
+"""按账号隔离的对话快照与用户显式偏好记忆。"""
 from ..infrastructure.database import application_database
 
 

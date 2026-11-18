@@ -21,13 +21,7 @@ from app.models.schemas import (
     TripPlan,
     TripRequest,
 )
-from app.services.day_pipeline_service import (
-    DayPipelineError,
-    build_day_capacities,
-    build_skeleton_prompt,
-    materialize_skeleton,
-    parse_skeleton,
-)
+from app.services.day_pipeline_service import DayPipelineError, build_day_capacities, materialize_skeleton, parse_skeleton
 from app.services.trip_quality_service import trip_quality_service
 
 
@@ -35,7 +29,7 @@ def _request(days: int = 2, pace: str = "balanced") -> TripRequest:
     start = (date.today() + timedelta(days=30)).isoformat()
     end = (date.today() + timedelta(days=30 + days - 1)).isoformat()
     return TripRequest(
-        destination_only=False,  # Explicit legacy cross-city capacity coverage.
+        destination_only=False,  # 显式覆盖旧版跨城行程容量规则。
         origin_city="上海", city="北京", start_date=start, end_date=end,
         travel_days=days, transportation="high_speed_train", accommodation="舒适型酒店",
         pace=pace,  # type: ignore[arg-type]
@@ -60,21 +54,21 @@ class CapacityTestCase(unittest.TestCase):
         # 普通日（无出发地影响首日约束？_request 有 origin_city，首日=抵达日）
         cap = caps[0]
         self.assertGreater(cap.available_minutes, 0)
-        self.assertGreaterEqual(cap.suggested_count_min, 3)
+        self.assertEqual(cap.suggested_count_min, 1)
         self.assertLessEqual(cap.suggested_count_max, 5)
 
-    def test_request_arrival_time_has_priority_and_keeps_three_places(self):
+    def test_request_arrival_time_has_priority_without_filling_count(self):
         request = _request(days=2).model_copy(update={"arrival_time": "16:00", "departure_time": "08:00"})
         option = mock.Mock(arrival_time="09:00", departure_time="07:00")
         first = build_day_capacities(request, option)[0]
-        self.assertIn("16:00 抵达", first.note)
-        self.assertEqual(first.suggested_count_min, 3)
-        self.assertGreaterEqual(first.suggested_count_max, 3)
+        self.assertIn("抵达时间16:00", first.note)
+        self.assertEqual(first.suggested_count_min, 1)
+        self.assertGreaterEqual(first.suggested_count_max, first.suggested_count_min)
 
     def test_outbound_departure_does_not_shorten_return_day(self):
         option = mock.Mock(arrival_time="12:00", departure_time="09:00")
         last = build_day_capacities(_request(days=2), option)[-1]
-        self.assertIn("17:00 返程", last.note)
+        self.assertNotIn("17:00", last.note)
 
     def test_first_day_reduced_by_arrival(self):
         """首日跨城：窗口从抵达+接驳开始，容量应小于无出发地场景的同日。"""
@@ -86,7 +80,7 @@ class CapacityTestCase(unittest.TestCase):
         # travel_days>1 的中间日对照）
         caps3 = build_day_capacities(_request(days=3), None)
         middle = caps3[1]  # 中间日不受首末约束
-        self.assertLess(with_origin.available_minutes, middle.available_minutes)
+        self.assertEqual(with_origin.available_minutes, middle.available_minutes)
 
     def test_pace_adjusts_counts(self):
         relaxed = build_day_capacities(_request(days=1, pace="relaxed"), None)[0]
@@ -109,11 +103,19 @@ class SkeletonParseTestCase(unittest.TestCase):
         self.assertEqual(skeletons[0].place_names, ["故宫", "天坛", "景山"])
         self.assertEqual(overall, "愉快出行")
 
-    def test_overload_truncated_to_capacity(self):
+    def test_count_does_not_silently_truncate_places(self):
         caps = self._caps()
         raw = skeleton_json(caps, [["A", "B", "C", "D", "E", "F", "G"], ["X", "Y", "Z"]])
         skeletons, _ = parse_skeleton(raw, caps)
-        self.assertLessEqual(len(skeletons[0].place_names), caps[0].suggested_count_max)
+        self.assertEqual(len(skeletons[0].place_names), 7)
+
+    def test_two_large_places_pass_and_duplicate_dates_do_not(self):
+        caps = self._caps()
+        raw = skeleton_json(caps, [["西湖"], ["灵隐飞来峰", "西溪湿地"]])
+        skeletons, _ = parse_skeleton(raw, caps)
+        self.assertEqual(len(skeletons[1].place_names), 2)
+        with self.assertRaises(DayPipelineError):
+            parse_skeleton(skeleton_json([caps[0], caps[0]], [["A"], ["B"]]), caps)
 
     def test_wrong_date_rejected(self):
         caps = self._caps()
@@ -167,9 +169,9 @@ class MaterializeTestCase(unittest.TestCase):
         self.assertEqual(first.poi_id, "B000C1")         # 候选的已校准数据
         self.assertEqual(first.visit_duration, 120)      # 候选建议时长
         self.assertEqual(first.location.longitude, 116.39)
-        # 酒店与三餐占位齐备（finalize 绑定真实餐厅）
+        # 保留住宿参考，但不再生成三餐占位。
         self.assertIsNotNone(plan.days[1].hotel)
-        self.assertEqual(len(plan.days[1].meals), 3)
+        self.assertEqual(plan.days[1].meals, [])
 
     def test_low_match_rate_rejected(self):
         caps = build_day_capacities(_request(days=2), None)

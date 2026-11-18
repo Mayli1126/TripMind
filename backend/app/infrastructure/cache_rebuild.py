@@ -1,4 +1,4 @@
-"""Request-owned, bounded distributed cache rebuilds; never fail open to a herd."""
+"""由请求持有所有权的有界分布式缓存重建，故障时也不放任请求同时回源。"""
 import random
 import threading
 import time
@@ -10,7 +10,7 @@ from .task_trace import emit
 
 
 class CacheBusyError(RuntimeError):
-    """No fresh value and no safe rebuild permission; caller may degrade/retry."""
+    """没有新鲜缓存，也未获得安全重建权限，调用方可降级或重试。"""
 
 
 _RENEW = """
@@ -43,7 +43,7 @@ class CacheRebuilder:
         self._flights = {}
 
     def get(self, key, loader, *, allow_stale=False, wait_seconds=None):
-        """Loader must return a validated success/actual-empty envelope, or raise."""
+        """加载器必须返回校验通过的成功或真实空结果封装，否则抛出异常。"""
         settings = get_settings()
         if not settings.cache_enabled:
             return loader()
@@ -138,7 +138,7 @@ class CacheRebuilder:
         thread = threading.Thread(target=renew, name='cache-lease', daemon=True)
         thread.start()
         try:
-            # Bypass L1: another process may have published between read and SET NX.
+            # 绕过一级缓存：读取与 SET NX 之间，其他进程可能已经发布新结果。
             result = shared_cache.read(key, bypass_local=True)
             if result.hit:
                 return result.entry
@@ -150,7 +150,7 @@ class CacheRebuilder:
                 raise CacheBusyError('缓存重建超过租约预算')
             prepared = shared_cache.prepare(key, entry)
             if prepared is None:
-                # Oversized values may serve this request, but never pollute caches.
+                # 超大结果可以用于本次响应，但不写入缓存。
                 return entry
             entry, raw = prepared
             if lost.is_set() or time.monotonic() >= limit:
@@ -170,7 +170,7 @@ class CacheRebuilder:
         except CacheBusyError:
             raise
         except Exception as exc:
-            # Provider failures are not empty results and are never cached.
+            # 上游服务失败不代表查询结果为空，不能作为空结果缓存。
             if stale is not None and stale.hard_until > time.time():
                 emit('cache', 'rebuild', 'stale', hit=True, error_type=type(exc).__name__)
                 return stale

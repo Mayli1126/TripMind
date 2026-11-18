@@ -20,7 +20,7 @@ from app.services.trip_quality_service import trip_quality_service
 def _request(origin_city: str = "上海") -> TripRequest:
     start = (date.today() + timedelta(days=30)).isoformat()
     return TripRequest(
-        destination_only=False,  # Legacy cross-city fixture.
+        destination_only=False,  # 旧版跨城行程测试数据。
         origin_city=origin_city,
         city="北京",
         start_date=start,
@@ -109,6 +109,7 @@ class ResearchFanoutTestCase(unittest.TestCase):
     def setUp(self):
         self.planner = FanoutStubPlanner()
         self.patches = [
+            mock.patch.object(pg, "research_hotels", side_effect=self._hotels),
             mock.patch.object(pg, "_get_planner", return_value=self.planner),
             mock.patch.object(pg, "get_checkpointer", return_value=None),
             mock.patch.object(
@@ -125,6 +126,11 @@ class ResearchFanoutTestCase(unittest.TestCase):
         for patch in self.patches:
             patch.start()
         pg.reset_compiled_graph()
+
+    def _hotels(self, request):
+        # 酒店已切换固定检索；此处仍验证它作为独立研究分支被调用和降级。
+        _, warning = self.planner._branch("酒店检索", "酒店资料")
+        return [], warning
 
     def tearDown(self):
         for patch in self.patches:

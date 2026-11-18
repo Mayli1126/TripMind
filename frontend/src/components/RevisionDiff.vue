@@ -10,17 +10,20 @@
         </div>
       </li>
     </ul>
-    <p v-else class="diff-empty">本次为整体重新生成，差异以结果页实际内容为准。</p>
+    <p v-else class="diff-empty">未提供具体修改明细，请核对修改结果后再确认。</p>
+    <p v-if="plan?.budget" class="diff-explanation">修改后预算参考：¥{{ plan.budget.total }}<span v-if="plan.budget.over_budget">（超出预算上限，请确认是否接受）</span></p>
+    <details v-if="plan?.warnings?.length"><summary>查看时间安排与预算提醒（{{ plan.warnings.length }}）</summary><ul><li v-for="warning in plan.warnings" :key="warning">{{ warning }}</li></ul></details>
     <p class="diff-hint">确认前不会改动当前行程；未受影响的天保持原样。</p>
   </div>
 </template>
 
 <script setup lang="ts">
-import type { RevisionChange } from '@/types'
+import type { RevisionChange, TripPlan } from '@/types'
 
 defineProps<{
   changes: RevisionChange[]
   explanation?: string
+  plan?: TripPlan
 }>()
 
 const ICONS: Record<string, string> = {
@@ -30,6 +33,7 @@ const ICONS: Record<string, string> = {
   move_place: '→',
   reorder_day: '↕',
   change_duration: '◷',
+  update_description: '✎',
   change_start_time: '◐',
   change_pace: '≈',
   update_transport: '🚆',

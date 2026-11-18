@@ -1,4 +1,4 @@
-"""Small offline checks for stage B; real Redis/multiprocess validation is deferred."""
+"""缓存重建的小规模离线检查，真实 Redis 和多进程验收另行执行。"""
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock
 from unittest import TestCase

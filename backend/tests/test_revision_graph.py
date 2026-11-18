@@ -3,7 +3,7 @@
 核心验收（产品化计划 16 节场景 5）：
 - "第二天少走路"只产生第二天 Patch，第一天的 stable_id 与内容不变；
 - Patch 校验失败时保留原版本；
-- 解析失败/超范围回退 legacy revise_trip；
+- 解析失败保留原计划，超范围要求用户明确重新规划；
 - add/replace 必须经高德 POI 校准，查不到拒绝修改（不伪造坐标）。
 """
 
@@ -33,7 +33,7 @@ def _request() -> TripRequest:
     start = (date.today() + timedelta(days=30)).isoformat()
     end = (date.today() + timedelta(days=31)).isoformat()
     return TripRequest(
-        destination_only=False,  # Legacy cross-city fixture.
+        destination_only=False,  # 旧版跨城行程测试数据。
         origin_city="上海",
         city="北京",
         start_date=start,
@@ -175,47 +175,27 @@ class _StubLLM:
         return self.payload
 
 
-class _ParseFailedPlanner:
-    """LLM 输出不含 JSON，触发回退 legacy revise_trip。"""
-
-    planner_agent = object()
-
-    def report_progress(self, callback, *args, **kwargs):
-        pass
-
-    def friendly_error(self, exc):
-        return str(exc)
-
-    def revise_trip(self, request, current_plan, instruction, progress_callback=None):
-        result = current_plan.model_copy(deep=True)
-        result.warnings.append(f"[legacy] 已根据修改要求更新：{instruction}")
-        return result
-
-
-class _OutOfScopePlanner(_ParseFailedPlanner):
-    pass
-
-
 class RevisionGraphTestCase(unittest.TestCase):
     def setUp(self):
         self.plan = _plan()
 
-    def test_parse_failure_falls_back_to_legacy(self):
-        with mock.patch.object(rg, "_get_planner", return_value=_ParseFailedPlanner()), \
+    def test_parse_failure_preserves_plan_without_legacy(self):
+        with mock.patch.object(rg.MultiAgentTripPlanner, "revise_trip", side_effect=AssertionError("不能自动整份重生成")), \
              mock.patch.object(rg, "_get_patch_llm", return_value=_StubLLM("抱歉，我无法完成")):
             result = run_revision_graph(_request(), self.plan, "改一下吧")
-        self.assertTrue(any("[legacy]" in w for w in result.warnings))
+        self.assertEqual(result.revision_status, "rejected")
+        self.assertFalse(result.revision_diff)
         # 原计划内容未被破坏
         self.assertEqual(len(result.days), 2)
 
-    def test_out_of_scope_falls_back_to_legacy(self):
-        with mock.patch.object(rg, "_get_planner", return_value=_OutOfScopePlanner()), \
+    def test_out_of_scope_requests_explicit_replanning(self):
+        with mock.patch.object(rg.MultiAgentTripPlanner, "revise_trip", side_effect=AssertionError("不能自动整份重生成")), \
              mock.patch.object(rg, "_get_patch_llm", return_value=_StubLLM('{"out_of_scope": true, "reason": "目的地变更"}')):
             result = run_revision_graph(_request(), self.plan, "目的地改成青岛")
-        self.assertTrue(any("[legacy]" in w for w in result.warnings))
+        self.assertEqual(result.revision_status, "clarify_needed")
+        self.assertFalse(result.revision_diff)
 
     def test_patch_path_applies_and_recomputes_budget(self):
-        planner = _ParseFailedPlanner()
         target = self.plan.days[1].attractions[2].stable_id
 
         def fake_parse(self_stub, agent, query):
@@ -226,7 +206,7 @@ class RevisionGraphTestCase(unittest.TestCase):
                 explanation="雍和宫只逛半小时",
             ).model_dump_json()
 
-        with mock.patch.object(rg, "_get_planner", return_value=planner), \
+        with mock.patch.object(rg.MultiAgentTripPlanner, "revise_trip", side_effect=AssertionError("不能自动整份重生成")), \
              mock.patch.object(rg, "_get_patch_llm", return_value=_StubLLM("raw")), \
              mock.patch.object(rg, "_parse_patch_response", side_effect=lambda raw: PlanPatch.model_validate_json(fake_parse(None, None, None))):
             result = run_revision_graph(_request(), self.plan, "雍和宫只逛半小时")

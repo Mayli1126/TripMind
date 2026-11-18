@@ -1,4 +1,4 @@
-"""Read a compact, field-addressable snapshot, without tools or silent edits."""
+"""读取精简且可按字段定位的快照，不调用工具或静默修改行程。"""
 
 import json
 
@@ -23,15 +23,15 @@ def _fields(value, path="", result=None):
 
 def answer_trip(trip: SavedTripDetail, payload: AssistantRequest, summary_context: str = '', memory_context: str = '') -> AssistantResponse:
     plan = trip.plan.model_dump(mode="json")
-    # Preserve budgets, sources and warnings before the longer per-day content.
+    # 在较长的逐日内容之前，优先保留预算、来源和警告。
     priority = {key: plan[key] for key in ("city", "start_date", "end_date", "budget", "warnings", "data_sources",
                 "data_quality", "intercity_journey", "return_journey", "overall_suggestions") if key in plan}
     fields = _fields(priority, "plan")
     request_fields = trip.request.model_dump(mode="json")
-    request_fields.pop('memory_context', None)  # Removed/paused preferences must not return through an old snapshot.
+    request_fields.pop('memory_context', None)  # 已删除或暂停的偏好不能通过旧快照重新生效。
     fields.update(_fields(request_fields, "request"))
     fields.update(_fields({key: value for key, value in plan.items() if key not in priority}, "plan"))
-    # Cap context by whole fields so every citation remains independently resolvable.
+    # 按完整字段限制上下文长度，保证每个引用仍可独立定位。
     context, size = {}, 0
     for path, value in fields.items():
         size += len(path) + len(value)

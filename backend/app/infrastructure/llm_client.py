@@ -32,6 +32,9 @@ def _is_retryable(exc: BaseException) -> bool:
 class LLMResult:
     content: str
     raw: Any = field(default=None, repr=False)
+    tool_calls: list[dict] = field(default_factory=list)
+    finish_reason: Optional[str] = None
+    reasoning_content: Optional[str] = field(default=None, repr=False)
 
 
 class LLMClient:
@@ -110,22 +113,69 @@ class LLMClient:
             **{k: v for k, v in kwargs.items() if k not in ("temperature", "max_tokens")},
         )
         parts: list[str] = []
+        reasoning: list[str] = []
+        calls: dict[int, dict] = {}
+        finish_reason = None
         with stream:
             for chunk in stream:
                 if chunk.choices:
-                    parts.append(chunk.choices[0].delta.content or "")
-        return LLMResult(content="".join(parts))
+                    choice = chunk.choices[0]
+                    parts.append(choice.delta.content or "")
+                    reasoning.append(getattr(choice.delta, "reasoning_content", None) or "")
+                    finish_reason = choice.finish_reason or finish_reason
+                    # 工具参数可能跨多个流片段，必须按 index 合并，不能只收集 content。
+                    for delta in choice.delta.tool_calls or []:
+                        call = calls.setdefault(delta.index, {"id": "", "type": "function",
+                                                              "function": {"name": "", "arguments": ""}})
+                        if delta.id:
+                            # 调用 ID 是完整标识；兼容上游重复发送，但不能拼成另一个 ID。
+                            if call["id"] and call["id"] != delta.id:
+                                raise ValueError("流式工具调用标识发生冲突")
+                            call["id"] = delta.id
+                        if delta.function:
+                            call["function"]["name"] += delta.function.name or ""
+                            call["function"]["arguments"] += delta.function.arguments or ""
+        return LLMResult(content="".join(parts), tool_calls=[calls[i] for i in sorted(calls)],
+                         finish_reason=finish_reason, reasoning_content="".join(reasoning) or None)
 
     # ------------------------------------------------------------------
     def invoke(self, messages: list[dict], **kwargs: Any) -> str:
         """非流式调用；代理探测失败后自动切直连流式。"""
+        return self.invoke_result(messages, **kwargs).content
+
+    def invoke_result(self, messages: list[dict], **kwargs: Any) -> LLMResult:
+        """需要判断截断或空回复的流程保留结束原因，普通调用仍兼容返回文本。"""
         from .task_trace import span
         with span('llm','completion',model=self.model[:100]):
             return self._invoke_untraced(messages,**kwargs)
 
+    def invoke_result_once(self, messages: list[dict], **kwargs: Any) -> LLMResult:
+        """有明确等待预算的结构化任务只请求一次，超时不再切直连重发。"""
+        from .task_trace import span
+        from .provider_guard import provider_guard
+        client = self._get_direct_client() if self._proxy_broken else self._client
+        with span('llm', 'structured_once', model=self.model[:100]):
+            with provider_guard.slot('llm', self.api_key, self.base_url):
+                response = client.chat.completions.create(model=self.model, messages=messages,
+                    temperature=self.temperature, **kwargs)
+        choice = response.choices[0]
+        return LLMResult(content=choice.message.content or "", raw=response,
+                         finish_reason=choice.finish_reason,
+                         reasoning_content=getattr(choice.message, "reasoning_content", None))
+
+    def invoke_tools(self, messages: list[dict], tools: list[dict], *, tool_choice="auto", **kwargs: Any) -> LLMResult:
+        """原生工具调用入口，保留调用标识、参数及结束原因，不降级为文本协议。"""
+        from .task_trace import span
+        if not tools:
+            raise ValueError("原生工具调用必须提供工具定义")
+        if any(key in kwargs for key in ("tools", "stream", "n", "functions", "function_call")):
+            raise ValueError("工具定义、流式模式和候选数量由工具执行器统一管理")
+        with span('llm', 'function_calling', model=self.model[:100]):
+            return self._invoke_untraced(messages, tools=tools, tool_choice=tool_choice, **kwargs)
+
     def _invoke_untraced(self,messages,**kwargs):
         if self._proxy_broken:
-            return self._direct_complete(messages, **kwargs).content
+            return self._direct_complete(messages, **kwargs)
         try:
             from .provider_guard import provider_guard
             with provider_guard.slot('llm', self.api_key, self.base_url):
@@ -136,13 +186,17 @@ class LLMClient:
                     max_tokens=kwargs.get("max_tokens", self.max_tokens),
                     **{k: v for k, v in kwargs.items() if k not in ("temperature", "max_tokens")},
                 )
-                return response.choices[0].message.content or ""
+                choice = response.choices[0]
+                return LLMResult(content=choice.message.content or "", raw=response,
+                                 tool_calls=[call.model_dump(exclude_none=True) for call in choice.message.tool_calls or []],
+                                 finish_reason=choice.finish_reason,
+                                 reasoning_content=getattr(choice.message, "reasoning_content", None))
         except Exception as exc:
             if _is_retryable(exc):
                 from .task_trace import emit
                 emit('llm','provider_retry','retrying',reason='switch_direct',error_type=type(exc).__name__)
                 self._proxy_broken = True
-                return self._direct_complete(messages, **kwargs).content
+                return self._direct_complete(messages, **kwargs)
             raise
 
     # 兼容旧调用名

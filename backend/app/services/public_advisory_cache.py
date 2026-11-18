@@ -1,4 +1,4 @@
-"""Public facts only. Never include trips, owners, guide text or preferences in keys."""
+"""仅缓存公共事实，缓存键不包含行程、归属人、攻略原文或偏好。"""
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -62,13 +62,13 @@ def official_policy(poi_id, visit_date, settings):
             policy = validate_policy(OfficialPolicy.model_validate(response.json()), poi_id, visit_date, settings)
         return make_entry('official_policy', policy.model_dump(mode='json'), 'trusted_policy_adapter',
             fetched_at=policy.verified_at.timestamp(), source_expires_at=policy.expires_at.timestamp())
-    # Hash service identity and trust policy; no endpoint/credential text appears in cache keys or logs.
+    # 对服务身份和信任策略取哈希，缓存键与日志不出现服务地址或凭据明文。
     scope = hashlib.sha256(json.dumps([settings.advisory_provider_url,
         sorted(h.strip().lower() for h in settings.advisory_official_hosts.split(',') if h.strip())]).encode()).hexdigest()
     key = make_key('official_policy', dict(provider='trusted_adapter_v1', trust_scope=scope,
         poi_id=poi_id, visit_date=visit_date))
     entry = cache_rebuilder.get(key, load) if settings.cache_enabled else load()
     policy = validate_policy(OfficialPolicy.model_validate(entry.data), poi_id, visit_date, settings)
-    # Snapshot must not outlive the cache's original hard limit either.
+    # 快照也不能超过缓存原始的硬过期时间。
     policy.expires_at = min(policy.expires_at, datetime.fromtimestamp(entry.hard_until, timezone.utc))
     return policy.model_dump(mode='json')

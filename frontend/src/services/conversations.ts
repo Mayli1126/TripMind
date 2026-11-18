@@ -7,7 +7,7 @@ export const listConversations = async (): Promise<Conversation[]> => (await api
 export const getConversation = async (id: string): Promise<Conversation> => (await apiClient.get(`/api/library/conversations/${id}`)).data
 export const deleteConversation = async (id: string) => apiClient.delete(`/api/library/conversations/${id}`)
 
-// randomUUID is secure-context-only in browsers; the current IP deployment uses HTTP.
+// 浏览器的 randomUUID 仅适用于安全上下文，当前 IP 部署使用 HTTP，需要兼容处理。
 export function newConversationId(): string {
   if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID()
   const bytes = new Uint8Array(16)

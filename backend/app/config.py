@@ -37,6 +37,16 @@ class Settings(BaseSettings):
 
     # 高德地图API配置
     amap_api_key: str = ""
+    # 无攻略选点使用百度智能搜索生成高性能版；其他 Agent 仍使用现有模型。
+    baidu_search_enabled: bool = True
+    baidu_search_api_key: str = ""
+    baidu_search_timeout_seconds: float = Field(default=45, ge=5, le=90)
+    baidu_search_daily_limit: int = Field(default=90, ge=0, le=90)
+    # 高性能版当日上限用完后切普通版；普通版的模型推理费用需另行核实。
+    baidu_search_standard_enabled: bool = True
+    baidu_search_standard_daily_limit: int = Field(default=90, ge=0, le=90)
+    baidu_search_standard_model: str = "deepseek-v4-flash"
+    baidu_search_cache_hours: int = Field(default=24, ge=1, le=168)
     road_routes_enabled: bool = True
     road_routes_max_seconds: float = 12
     road_routes_max_calls: int = 24
@@ -67,7 +77,7 @@ class Settings(BaseSettings):
     # Redis 配置（阶段 D：任务队列/状态/缓存/配额）
     redis_enabled: bool = False          # 总开关：false 时沿用内存任务队列
     redis_url: str = "redis://localhost:6379/0"
-    # Independent public-fact cache; stage B migrates POI searches and road routes.
+    # 独立的公共事实缓存，供地点检索和道路路线共用。
     cache_enabled: bool = False
     cache_redis_url: str = ''
     cache_max_connections: int = Field(default=16, ge=1, le=512)

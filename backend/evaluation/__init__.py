@@ -1,2 +1,2 @@
-"""Offline evaluation utilities."""
+"""离线评估工具。"""
 

@@ -1,4 +1,4 @@
-"""Offline admission checks; real Redis scripts and multiprocess load are deferred."""
+"""离线检查任务准入，真实 Redis 脚本和多进程负载验证另行执行。"""
 from unittest import TestCase
 from unittest.mock import patch
 from app.config import get_settings

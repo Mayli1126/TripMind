@@ -1,14 +1,12 @@
-"""Small real-Redis acceptance on an explicitly isolated loopback test instance."""
+"""仅在显式隔离的本机 Redis 测试实例上进行小规模真实验收。"""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-import json
 import os
 import subprocess
 import sys
 import time
 from uuid import uuid4
-from unittest.mock import patch
 
 
 def main():
@@ -24,18 +22,17 @@ def main():
         JOB_USER_ACTIVE_LIMIT='2',JOB_GLOBAL_ACTIVE_LIMIT='3',JOB_QUEUE_CAPACITY='3')
     import redis
     from fastapi import HTTPException
-    from app.config import get_settings
     from app.infrastructure import redis_client
     from app.infrastructure.shared_cache import shared_cache, make_key
     from app.infrastructure.cache_rebuild import cache_rebuilder, CacheBusyError
-    from app.infrastructure.provider_guard import provider_guard, ProviderBusyError
+    from app.infrastructure.provider_guard import provider_guard
     from app.services.cache_policy import make_entry
     from app.services.job_admission import submission_owner, ADMISSION_KEY
     from app.services.operations_service import queue_snapshot
     client=redis.Redis.from_url(args.redis_url,decode_responses=True)
     client.ping(); redis_client._client=client; redis_client._group_ready=False
     stamp=uuid4().hex
-    # Real Lua publication, original age, negative cache and lost-owner fencing.
+    # 验证真实 Lua 发布、原始数据年龄、空结果缓存与失去所有权后的隔离。
     key=make_key('poi',dict(fixture=stamp))
     entry=cache_rebuilder.get(key,lambda:make_entry('poi',[],'fixture',empty=True))
     assert shared_cache.read(key).status=='negative'
@@ -52,7 +49,7 @@ def main():
         pass
     assert client.get(lost.lock_key)=='replacement' and not client.exists(lost.data_key)
     print('PASS real Lua cache publication, absolute expiry, negative cache and owner fencing')
-    # A second process must observe the first process's permit.
+    # 第二个进程必须能观察到第一个进程持有的调用许可。
     with provider_guard.slot('amap',stamp) as permit:
         child="from app.infrastructure.provider_guard import provider_guard,ProviderBusyError\ntry: provider_guard.acquire('amap',"+repr(stamp)+")\nexcept ProviderBusyError: print('blocked')\nelse: raise AssertionError('cross-process limit bypassed')"
         result=subprocess.run([sys.executable,'-c',child],capture_output=True,text=True,timeout=10)

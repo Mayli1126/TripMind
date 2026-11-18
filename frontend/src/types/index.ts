@@ -13,6 +13,15 @@ export interface Location {
 }
 
 export interface Attraction {
+  route_entry?: { poi_id: string; name: string; location: Location; source: string } | null
+  route_exit?: { poi_id: string; name: string; location: Location; source: string } | null
+  visit_mode?: 'classic' | 'deep'
+  duration_reason?: string
+  duration_source?: 'ai_estimate' | 'user_confirmed'
+  suitable_time?: 'day' | 'evening' | 'night' | 'any' | 'unknown'
+  match_evidence?: { status?: string; method?: string; input_name?: string; matched_name?: string; recommendation_evidence_status?: 'quote_verified' | 'source_context_verified' | 'unverified' }
+  parent_poi_id?: string
+  stable_id?: string
   amap_average_cost?: number | null
   advisory?: AttractionAdvisory | null
   name: string
@@ -23,6 +32,7 @@ export interface Attraction {
   category?: string
   rating?: number
   image_url?: string
+  recommendation_sources?: string[]
   photos?: string[]
   poi_id?: string
   ticket_price?: number | null
@@ -60,6 +70,8 @@ export interface Meal {
 }
 
 export interface Hotel {
+  poi_id?: string
+  price_policy?: 'auto' | 'budget_only'
   price_source?: string
   price_note?: string
   amap_average_cost?: number | null
@@ -85,7 +97,12 @@ export interface DailyRouteSummary {
   end_transfer_km: number
 }
 
+export type TransportMode = 'walking' | 'cycling' | 'driving' | 'transit'
 export interface ScheduleItem {
+  route_origin?: Location
+  route_destination?: Location
+  route_reference_time?: string
+  selected_route_mode?: TransportMode | ''
   route_leg?: { mode: string; distance_km: number; duration_minutes: number; cost: number; cost_unit: 'person' | 'vehicle'; source: string; is_estimated: boolean; cost_is_estimated: boolean; cost_source: string; checked_at: string; note: string }
   start_time: string
   end_time: string
@@ -134,6 +151,13 @@ export interface DataSource {
 }
 
 export interface DayPlan {
+  schedule_mode?: 'duration' | 'timed'
+  visit_minutes?: number
+  transport_minutes?: number
+  total_minutes?: number
+  timing_notes?: string[]
+  arrangement_reason?: string
+  single_place_reason?: string
   date: string
   day_index: number
   description: string
@@ -170,6 +194,8 @@ export interface TripPlan {
   warnings: string[]
   data_sources: DataSource[]
   revision_diff?: RevisionChange[]
+  revision_status?: 'draft_ready' | 'applied' | 'rejected' | 'unchanged' | 'clarify_needed' | null
+  revision_message?: string
   optimization_summary?: OptimizationSummary
   planning_iterations: number
   intercity_journey?: IntercityJourney
@@ -233,12 +259,6 @@ export interface PlannerChatResponse {
   draft: Partial<TripFormData> & { preferences_confirmed?: boolean }
   ready: boolean
   request?: TripFormData | null
-}
-
-export interface TripPlanResponse {
-  success: boolean
-  message: string
-  data?: TripPlan
 }
 
 export type PlanningJobStatus = 'queued' | 'running' | 'retrying' | 'waiting_input' | 'cancelling' | 'cancelled' | 'completed' | 'failed'
@@ -387,18 +407,6 @@ export interface TransportationOption {
   description?: string
   is_estimated: boolean
   source: string
-}
-
-export interface TransportationRequest {
-  origin_city: string
-  destination_city: string
-  date?: string
-}
-
-export interface TransportationResponse {
-  success: boolean
-  message: string
-  data: TransportationOption[]
 }
 
 // ---------------------------------------------------------------------------

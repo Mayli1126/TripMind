@@ -13,16 +13,7 @@ import fakeredis
 
 from app.infrastructure import redis_client
 from tests.queue_fixtures import publish_fixture
-from app.infrastructure.redis_client import (
-    ack_job,
-    append_job_event,
-    dequeue_jobs,
-    enqueue_job,
-    get_job_state,
-    quota_check_and_incr,
-    read_job_events,
-    set_job_state,
-)
+from app.infrastructure.redis_client import ack_job, append_job_event, dequeue_jobs, get_job_state, quota_check_and_incr, read_job_events, set_job_state
 from app.models.schemas import TripPlan
 from app.services import planning_worker
 from app.services.attraction_image_service import (
@@ -119,7 +110,7 @@ class RedisStageDTestCase(unittest.TestCase):
             [event["sequence"] for event in read_job_events("job-2", 1)], [1]
         )
 
-    # -- RedisJobRecorder -------------------------------------------------
+    # -- Redis 任务记录器 -------------------------------------------------
 
     def test_recorder_lifecycle_and_response(self):
         recorder = RedisJobRecorder("job-3")
@@ -144,7 +135,7 @@ class RedisStageDTestCase(unittest.TestCase):
             [event["sequence"] for event in events], list(range(len(events)))
         )
 
-    # -- Worker -----------------------------------------------------------
+    # -- 任务执行器 -----------------------------------------------------------
 
     def test_worker_process_once_completes_job(self):
         publish_fixture("job-4", "plan", {"request": self._request(), "attempt": 0})

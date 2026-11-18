@@ -1,4 +1,4 @@
-"""Bounded L1 and independent Redis transport; rebuild ownership is in cache_rebuild."""
+"""有界的一级缓存与独立 Redis 读写，重建所有权由 cache_rebuild 模块管理。"""
 from collections import OrderedDict
 from dataclasses import dataclass
 import hashlib
@@ -36,7 +36,7 @@ def make_key(kind: CacheKind, parameters: dict) -> CacheKey:
 
 @dataclass(frozen=True)
 class CacheRead:
-    status: str  # fresh / stale / negative / miss / disabled / unavailable / invalid / oversized
+    status: str  # 缓存状态依次为：新鲜、过期可用、空结果、未命中、关闭、不可用、无效、超大。
     entry: CacheEnvelope | None = None
     layer: str = ''
 
@@ -150,8 +150,8 @@ class SharedCache:
             return CacheRead('unavailable', layer='l2')
 
     def prepare(self, key: CacheKey, entry: CacheEnvelope):
-        """Validate/cap before either explicit writes or fenced publication."""
-        # Revalidate to avoid accepting an envelope mutated after creation.
+        """显式写入或带所有权校验的发布之前，先校验格式与容量。"""
+        # 重新校验，防止接受创建后又被修改的缓存封装。
         entry = CacheEnvelope.model_validate(entry.model_dump())
         policy = POLICIES[key.kind]
         hard_cap = entry.fetched_at + (policy.negative_seconds if entry.outcome == 'empty' else policy.hard_seconds)
@@ -166,7 +166,7 @@ class SharedCache:
         return entry, raw
 
     def write(self, key: CacheKey, entry: CacheEnvelope) -> str:
-        """Explicit administrative write; rebuilds use token-checked publication."""
+        """这是显式管理写入；缓存重建则使用带令牌校验的发布流程。"""
         if not get_settings().cache_enabled:
             return 'disabled'
         prepared = self.prepare(key, entry)
@@ -180,7 +180,7 @@ class SharedCache:
             client = self._redis()
             if client is None:
                 return 'local_only'
-            # Absolute expiry preserves original age across layers and repeated writes.
+            # 使用绝对过期时间，跨缓存层或重复写入时仍保留原始数据年龄。
             client.set(key.data_key, raw, pxat=math.floor(entry.hard_until*1000))
             emit('cache', 'shared_write', 'completed')
             return 'shared'

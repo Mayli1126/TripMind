@@ -17,7 +17,7 @@ import hashlib
 import unicodedata
 from typing import Optional
 
-from ..models.candidate import CandidatePlace, FactStatus, UserChoice
+from ..models.candidate import CandidatePlace, UserChoice
 
 # 事实状态升级序：索引越大越可信
 _FACT_RANK: dict[str, int] = {"unverified": 0, "partially_verified": 1, "verified": 2}

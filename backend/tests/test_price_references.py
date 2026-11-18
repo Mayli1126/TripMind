@@ -1,6 +1,6 @@
 from unittest import TestCase
 from unittest.mock import patch
-from app.models.schemas import TripPlan, Hotel, Budget
+from app.models.schemas import TripPlan, Hotel
 from app.services.attraction_hours_kb import AttractionHours
 from app.services.price_reference_service import apply_price_references
 from app.services.trip_quality_service import trip_quality_service

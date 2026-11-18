@@ -1,4 +1,4 @@
-"""SQLite users, hashed sessions and ownership for private application resources."""
+"""使用 SQLite 管理用户、哈希会话和私有资源归属。"""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ class AuthService:
 
     @staticmethod
     def _claim_legacy(db, admin_id):
-        # Ownership lives in a separate table: existing itinerary JSON and version chains stay intact.
+        # 资源归属单独存表，保留现有行程 JSON 和版本链。
         for kind, table in (("trip", "trips"), ("guide", "guide_sources")):
             if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
                 db.execute(

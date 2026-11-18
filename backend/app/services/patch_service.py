@@ -154,8 +154,6 @@ def _apply_single(
             return fail("UNVERIFIED_REQUIRED_POI", f"未找到要移动的地点（stable_id={op.target_stable_id}）")
         if op.day_index is None or op.day_index >= len(plan.days):
             return fail("DAILY_OVERLOAD", f"移动目标日无效（day_index={op.day_index}）")
-        if op.day_index in plan.days and src_day is not None and plan.days[op.day_index] is src_day:
-            pass  # 同日内移动等价于重排，允许
         src_day.attractions.remove(attraction)
         dest = plan.days[op.day_index]
         pos = min(op.position if op.position is not None else len(dest.attractions), len(dest.attractions))
@@ -180,6 +178,13 @@ def _apply_single(
         day.attractions = [by_id[sid] for sid in ordered]
         return True
 
+    if op.op == "update_description":
+        _, attraction = _find_attraction(plan, op.target_stable_id)
+        if attraction is None:
+            return fail("UNVERIFIED_REQUIRED_POI", "未找到需要修改介绍的景点")
+        attraction.description = op.description
+        return True
+
     if op.op == "change_duration":
         _, attraction = _find_attraction(plan, op.target_stable_id)
         if attraction is None:
@@ -187,6 +192,7 @@ def _apply_single(
         if op.duration_minutes is None:
             return fail("DAILY_OVERLOAD", "change_duration 缺少 duration_minutes")
         attraction.visit_duration = op.duration_minutes
+        attraction.duration_source = "user_confirmed"
         return True
 
     if op.op == "change_pace":
@@ -303,4 +309,9 @@ def apply_plan_patch(
 
     # 修改后补全新增景点的 stable_id
     ensure_stable_ids(new_plan)
+    for index, (old_day, new_day) in enumerate(zip(plan.days, new_plan.days)):
+        if old_day.attractions and not new_day.attractions:
+            issues.append(PlanIssue(code="DAILY_OVERLOAD", severity="error",
+                                    message=f"第{index + 1}天不能移除全部景点，请保留至少一个地点或重新规划。",
+                                    day_index=index))
     return new_plan, issues

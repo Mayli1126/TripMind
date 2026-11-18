@@ -33,11 +33,3 @@ def get_llm() -> LLMClient:
         print(f"   最大输出: {_llm_instance.max_tokens} tokens")
 
     return _llm_instance
-
-
-def reset_llm():
-    """重置LLM实例(用于测试或重新配置)"""
-    global _llm_instance
-    if _llm_instance is not None:
-        _llm_instance.shutdown()
-    _llm_instance = None

@@ -18,31 +18,31 @@ if TYPE_CHECKING:
 # 全局MCP工具实例
 _amap_mcp_tool = None
 
-# POI coordinates are effectively static.  Keep a fast process-local cache and,
-# when Redis is enabled, a shared second-level cache.  The third-party Amap MCP
-# wrapper intentionally drops ``location`` from text-search results, so the
-# normal production path below calls the same official endpoint directly and
-# avoids a second detail request for every POI.
+# 地点坐标相对稳定，先使用快速的进程内缓存；
+# 启用 Redis 后再使用共享二级缓存。第三方高德 MCP
+# 封装会丢弃文本检索结果中的 location 字段，因此
+# 正常运行时直接调用同一个官方接口，
+# 避免为每个地点再请求一次详情。
 _POI_CACHE_TTL_SECONDS = 7 * 24 * 3600
 _POI_MEMORY_CACHE_SIZE = 2048
 _POI_MEMORY_CACHE: "OrderedDict[str, tuple[float, list[dict[str, Any]]]]" = OrderedDict()
 _POI_CACHE_LOCK = threading.Lock()
 _POI_INFLIGHT: dict[str, threading.Event] = {}
 
-# The observed developer-key quota rejects a burst of four concurrent calls.
-# Spacing only the inexpensive POI HTTP calls prevents bursts while the rest of
-# the planning graph (LLM, weather, transport) remains fully concurrent.
+# 实测当前开发者密钥的配额无法承受瞬间四个并发请求。
+# 只对地点 HTTP 请求设置间隔来抑制突发流量，
+# 规划图中的模型、天气和交通任务仍可并发执行。
 _AMAP_POI_MIN_INTERVAL_SECONDS = 0.28
 _AMAP_RATE_LOCK = threading.Lock()
 _AMAP_NEXT_REQUEST_AT = 0.0
 
 
 class AmapRateLimitError(RuntimeError):
-    """Raised after the short local retry budget for an Amap QPS error."""
+    """高德每秒请求限流的本地短重试次数耗尽后抛出此异常。"""
 
 
 def _parse_average_cost(item):
-    """Only structured Amap cost fields; blank/invalid is unknown, not zero."""
+    """只读取高德结构化消费字段；空值或无效值表示未知，不代表免费。"""
     import math
     for field in ('biz_ext', 'business'):
         data = item.get(field)
@@ -64,7 +64,7 @@ def _normalise_cache_part(value: str) -> str:
 
 def _poi_cache_key(keywords: str, city: str, citylimit: bool) -> str:
     return (
-        f"amap:poi:v3:{_normalise_cache_part(city)}:"
+        f"amap:poi:v4:{_normalise_cache_part(city)}:"
         f"{_normalise_cache_part(keywords)}:{int(citylimit)}"
     )
 
@@ -73,7 +73,7 @@ def _poi_around_cache_key(
     keywords: str, location: Location, radius: int
 ) -> str:
     return (
-        f"amap:around:v3:{location.longitude:.5f}:{location.latitude:.5f}:"
+        f"amap:around:v4:{location.longitude:.5f}:{location.latitude:.5f}:"
         f"{int(radius)}:{_normalise_cache_part(keywords)}"
     )
 
@@ -154,7 +154,7 @@ def _poi_cache_write(cache_key: str, pois: List[POIInfo]) -> None:
 
 
 def _wait_for_amap_poi_slot() -> None:
-    """Space POI calls globally without serialising non-Amap planning work."""
+    """对地点查询统一设置调用间隔，不串行阻塞其他规划任务。"""
     global _AMAP_NEXT_REQUEST_AT
     with _AMAP_RATE_LOCK:
         now = time.monotonic()
@@ -236,7 +236,7 @@ def get_amap_mcp_tool() -> "MCPToolAdapter":
     """
     获取高德地图MCP工具实例(单例模式)
 
-    Returns:
+    返回：
         MCPToolAdapter 实例（底层为官方 mcp SDK 会话池）
     """
     global _amap_mcp_tool
@@ -256,34 +256,34 @@ class AmapService:
 
     def __init__(self, mcp_tool: Optional["MCPToolAdapter"] = None):
         """初始化服务；并行任务可注入独占 MCP 连接。"""
-        # Injected tools are used by tests and specialised callers.  Keep their
-        # MCP parsing path intact; normal application instances use the direct
-        # one-call POI path below.
+        # 测试和特殊调用方会注入工具，因此保留它们的
+        # MCP 解析路径；正常应用实例使用下方的
+        # 单次地点查询路径。
         self._prefer_direct_poi_search = mcp_tool is None
         self._mcp_tool = mcp_tool
 
     @property
     def mcp_tool(self) -> "MCPToolAdapter":
-        """Initialise the MCP manager only when a non-POI operation needs it."""
+        """只有非地点查询操作确实需要时，才初始化 MCP 管理器。"""
         if self._mcp_tool is None:
             self._mcp_tool = get_amap_mcp_tool()
         return self._mcp_tool
 
     @mcp_tool.setter
     def mcp_tool(self, value: "MCPToolAdapter") -> None:
-        # Kept for test fakes and existing callers that replace the adapter.
+        # 保留此适配入口，供测试替身和已有调用方替换实现。
         self._mcp_tool = value
     
     def search_poi(self, keywords: str, city: str, citylimit: bool = True) -> List[POIInfo]:
         """
         搜索POI
         
-        Args:
+        参数：
             keywords: 搜索关键词
             city: 城市
             citylimit: 是否限制在城市范围内
             
-        Returns:
+        返回：
             POI信息列表
         """
         if getattr(self, "_prefer_direct_poi_search", False):
@@ -334,6 +334,9 @@ class AmapService:
                 pois.append(POIInfo(
                     id=str(best.get("id", "")),
                     name=str(best["name"]),
+                    city_name=str(best.get("cityname") or ""),
+                    type_code=str(best.get("typecode") or ""),
+                    parent_poi_id=best.get("parent") if isinstance(best.get("parent"), str) else "",
                     type=str(best.get("type", best.get("typecode", ""))),
                     address=str(best.get("address", "")),
                     location=best_location,
@@ -350,6 +353,9 @@ class AmapService:
                 pois.append(POIInfo(
                     id=str(item.get("id", "")),
                     name=str(item["name"]),
+                    city_name=str(item.get("cityname") or ""),
+                    type_code=str(item.get("typecode") or ""),
+                    parent_poi_id=item.get("parent") if isinstance(item.get("parent"), str) else "",
                     type=str(item.get("type", item.get("category", ""))),
                     address=str(item.get("address", "")),
                     location=location,
@@ -371,23 +377,24 @@ class AmapService:
         citylimit: bool,
         location: Optional[Location] = None,
         radius: int = 2000,
+        limit: int = 20,
     ) -> List[POIInfo]:
-        """One-call official POI search with L1/L2 cache and single-flight."""
+        """单次官方地点检索，使用两级缓存，并合并相同查询的并发请求。"""
         if get_settings().cache_enabled:
             from ..infrastructure.shared_cache import make_key
             from ..infrastructure.cache_rebuild import cache_rebuilder
             from .cache_policy import make_entry
             kind = 'around' if location is not None else 'poi'
-            parameters = dict(provider='amap', api='v3/place-cost-v1', keywords=keywords.strip(),
-                              offset=20, page=1, extensions='all')
+            parameters = dict(provider='amap', api='v3/place-city-cost-v2', keywords=keywords.strip(),
+                              offset=limit, page=1, extensions='all')
             if location is not None:
-                # Exact request coordinate precision, no geographic rounding for cache hits.
+                # 保留请求坐标的原始精度，不为缓存命中而对地理位置取整。
                 parameters.update(location=f'{location.longitude},{location.latitude}', radius=int(radius))
             else:
                 parameters.update(city=city.strip(), citylimit=bool(citylimit))
             def load():
                 pois = self._search_poi_direct(keywords, city, citylimit, location=location,
-                                               radius=radius, allow_empty=True)
+                                               radius=radius, allow_empty=True, limit=limit)
                 return make_entry(kind, _serialise_pois(pois), 'amap_v3_place', empty=not pois)
             entry = cache_rebuilder.get(make_key(kind, parameters), load)
             return _deserialise_pois(entry.data)
@@ -395,7 +402,7 @@ class AmapService:
             _poi_around_cache_key(keywords, location, radius)
             if location is not None
             else _poi_cache_key(keywords, city, citylimit)
-        )
+        ) + f":limit:{limit}"
         cached = _poi_cache_read(cache_key)
         if cached:
             return cached
@@ -409,8 +416,8 @@ class AmapService:
                 owner = True
 
         if not owner:
-            # A duplicate query shares the first caller's result rather than
-            # consuming another unit of Amap quota.
+            # 重复查询共享首个调用者的结果，
+            # 避免再次消耗高德调用配额。
             event.wait(timeout=20.0)
             cached = _poi_cache_read(cache_key)
             if cached:
@@ -418,7 +425,7 @@ class AmapService:
 
         try:
             pois = self._search_poi_direct(
-                keywords, city, citylimit, location=location, radius=radius
+                keywords, city, citylimit, location=location, radius=radius, limit=limit
             )
             _poi_cache_write(cache_key, pois)
             return pois
@@ -429,6 +436,20 @@ class AmapService:
                 if finished is not None:
                     finished.set()
 
+    def search_tourism_pois(self, keywords: str, city: str) -> List[POIInfo]:
+        """规划专用：只取高德排序第一条并保留坐标，其他搜索入口不受影响。"""
+        return self._search_poi_cached_direct(keywords, city, True, limit=1)[:1]
+
+    def search_hotel_pois(self, keywords: str, city: str) -> List[POIInfo]:
+        """酒店快速路径：单页、一次尝试、五秒网络超时，不查详情。"""
+        return self._search_poi_direct(keywords, city, True, allow_empty=True,
+                                       max_attempts=1, request_timeout=5)
+
+    def search_poi_once(self, keywords: str, city: str, timeout: float = 3) -> List[POIInfo]:
+        """补搜与路线锚点的有界核验，不进入多次重试或工具自由循环。"""
+        return self._search_poi_direct(keywords, city, True, allow_empty=True,
+                                      max_attempts=1, request_timeout=timeout)
+
     def _search_poi_direct(
         self,
         keywords: str,
@@ -437,11 +458,14 @@ class AmapService:
         location: Optional[Location] = None,
         radius: int = 2000,
         allow_empty: bool = False,
+        max_attempts: int = 3,
+        request_timeout: float = 12,
+        limit: int = 20,
     ) -> List[POIInfo]:
-        """Call Amap's official text-search endpoint and retain ``location``.
+        """调用高德官方文本检索接口，保留 location 坐标字段。
 
-        ``amap-mcp-server`` currently removes that field, which otherwise
-        forces a second detail request and doubles the QPS pressure.
+        当前 amap-mcp-server 会移除此字段，导致
+        不得不再次请求详情，使每秒请求压力翻倍。
         """
         settings = get_settings()
         last_limit_message = "CUQPS_HAS_EXCEEDED_THE_LIMIT"
@@ -452,7 +476,7 @@ class AmapService:
                 "keywords": keywords,
                 "location": f"{location.longitude},{location.latitude}",
                 "radius": str(radius),
-                "offset": 20,
+                "offset": limit,
                 "page": 1,
                 "extensions": "all",
             }
@@ -463,11 +487,11 @@ class AmapService:
                 "keywords": keywords,
                 "city": city,
                 "citylimit": str(citylimit).lower(),
-                "offset": 20,
+                "offset": limit,
                 "page": 1,
                 "extensions": "all",
             }
-        for attempt in range(3):
+        for attempt in range(max_attempts):
             from ..infrastructure.task_trace import span
             with span('map_http','rate_limit_wait'):
                 _wait_for_amap_poi_slot()
@@ -475,11 +499,11 @@ class AmapService:
                 from ..infrastructure.task_trace import span
                 with span('map_http','poi_search',attempt=attempt):
                     from ..infrastructure.provider_guard import map_http
-                    response = map_http(lambda: requests.get(endpoint,params=params,timeout=12))
+                    response = map_http(lambda: requests.get(endpoint,params=params,timeout=request_timeout))
                     response.raise_for_status()
                     payload = response.json()
             except (requests.RequestException, ValueError) as exc:
-                if attempt < 2:
+                if attempt < max_attempts - 1:
                     from ..infrastructure.task_trace import emit
                     emit('map_http','poi_retry','retrying',attempt=attempt+1,error_type=type(exc).__name__)
                     time.sleep((0.18 * (2 ** attempt)) + random.uniform(0.02, 0.08))
@@ -490,7 +514,7 @@ class AmapService:
                 message = str(payload.get("info") or payload.get("infocode") or "未知错误")
                 if "QPS" in message.upper() or "LIMIT" in message.upper():
                     last_limit_message = message
-                    if attempt < 2:
+                    if attempt < max_attempts - 1:
                         time.sleep((0.2 * (2 ** attempt)) + random.uniform(0.03, 0.1))
                         continue
                     raise AmapRateLimitError(
@@ -513,6 +537,9 @@ class AmapService:
                 pois.append(POIInfo(
                     id=str(item.get("id", "")),
                     name=str(item["name"]),
+                    city_name=str(item.get("cityname") or ""),
+                    type_code=str(item.get("typecode") or ""),
+                    parent_poi_id=item.get("parent") if isinstance(item.get("parent"), str) else "",
                     type=str(item.get("type", item.get("typecode", ""))),
                     address=str(item.get("address", "")),
                     location=location,
@@ -580,10 +607,10 @@ class AmapService:
         """
         查询天气
         
-        Args:
+        参数：
             city: 城市名称
             
-        Returns:
+        返回：
             天气信息列表
         """
         try:
@@ -638,14 +665,14 @@ class AmapService:
         """
         规划路线
         
-        Args:
+        参数：
             origin_address: 起点地址
             destination_address: 终点地址
             origin_city: 起点城市
             destination_city: 终点城市
             route_type: 路线类型 (walking/driving/transit)
             
-        Returns:
+        返回：
             路线信息
         """
         try:
@@ -712,11 +739,11 @@ class AmapService:
         """
         地理编码(地址转坐标)
 
-        Args:
+        参数：
             address: 地址
             city: 城市
 
-        Returns:
+        返回：
             经纬度坐标
         """
         try:
@@ -753,13 +780,13 @@ class AmapService:
         """
         搜索餐厅/美食POI
         
-        Args:
+        参数：
             keywords: 搜索关键词（如"美食"、"餐厅"、"火锅"等）
             city: 城市
             location: 中心点坐标（可选，用于附近搜索）
             radius: 搜索半径（米）
             
-        Returns:
+        返回：
             POI信息列表
         """
         if getattr(self, "_prefer_direct_poi_search", False):
@@ -802,6 +829,9 @@ class AmapService:
                 pois.append(POIInfo(
                     id=str(item.get("id", "")),
                     name=str(item["name"]),
+                    city_name=str(item.get("cityname") or ""),
+                    type_code=str(item.get("typecode") or ""),
+                    parent_poi_id=item.get("parent") if isinstance(item.get("parent"), str) else "",
                     type=str(item.get("type", item.get("category", "餐饮服务"))),
                     address=str(item.get("address", "")),
                     location=loc,
@@ -820,10 +850,10 @@ class AmapService:
         """
         获取POI详情
 
-        Args:
-            poi_id: POI ID
+        参数：
+            poi_id: 地点标识
 
-        Returns:
+        返回：
             POI详情信息
         """
         try:
@@ -865,12 +895,12 @@ class AmapService:
         """
         查询通勤费用和交通方式
 
-        Args:
+        参数：
             origin_city: 出发城市
             destination_city: 目的城市
             date: 出发日期
 
-        Returns:
+        返回：
             交通方式选项列表
         """
         try:
@@ -888,11 +918,11 @@ class AmapService:
         """
         获取备用通勤费用数据（当LLM查询失败时使用）
 
-        Args:
+        参数：
             origin_city: 出发城市
             destination_city: 目的城市
 
-        Returns:
+        返回：
             交通方式选项列表
         """
         city_pairs = {

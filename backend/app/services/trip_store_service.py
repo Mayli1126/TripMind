@@ -1,4 +1,4 @@
-"""SQLite-backed personal trip library and preference store."""
+"""使用 SQLite 保存个人行程库与偏好设置。"""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from .trip_quality_service import trip_quality_service
 
 
 class TripStoreService:
-    """Persist trips locally without requiring an external database service."""
+    """将行程持久化到本地，无需外部数据库服务。"""
 
     def __init__(self, database_path: str | Path | None = None) -> None:
         self.database_path = Path(database_path or DEFAULT_DATABASE_PATH)
@@ -146,7 +146,9 @@ class TripStoreService:
     def add_version(self, trip_id: str, payload: SavedTripUpdate) -> SavedTripDetail:
         now = self._now()
         updated_plan = payload.plan.model_copy(deep=True)
-        # Read a base snapshot without holding the database write lock during map calls.
+        if updated_plan.revision_status in {"rejected", "unchanged", "clarify_needed"}:
+            raise ValueError(updated_plan.revision_message or "本次修改未生效，不能保存为新版本")
+        # 先读取基础快照，地图调用期间不持有数据库写锁。
         with self._connection() as connection:
             row = connection.execute(
                 """SELECT t.current_version, t.request_json, v.plan_json
@@ -164,6 +166,10 @@ class TripStoreService:
             request_data.setdefault('destination_only', False)
             request = TripRequest.model_construct(**request_data)
             current_plan = TripPlan.model_validate_json(row["plan_json"])
+            if updated_plan.revision_status in {"draft_ready", "applied"}:
+                from .revision_outcome import has_plan_changes
+                if not has_plan_changes(current_plan, updated_plan):
+                    raise ValueError("本次修改未产生实际变化，不能保存为新版本")
             journey_count = 2 if request.trip_type == "round_trip" else 1
             intercity_per_person = 0
             if current_plan.budget and request.travelers and journey_count:
@@ -171,12 +177,21 @@ class TripStoreService:
                     current_plan.budget.intercity_transportation
                     / request.travelers / journey_count
                 )
-            updated_plan = trip_quality_service.finalize(
+            changed_days = {
+                index for index, day in enumerate(updated_plan.days)
+                if index >= len(current_plan.days) or day != current_plan.days[index] or not day.schedule
+            }
+            from .revision_intent import dependent_days
+            changed_days = dependent_days(current_plan, updated_plan, changed_days)
+            requested_orders = [[a.stable_id or a.name for a in day.attractions] for day in updated_plan.days]
+            updated_plan = trip_quality_service.finalize_revision(
                 updated_plan,
                 request,
+                changed_days=changed_days,
                 intercity_cost_per_person=intercity_per_person,
-                resolve_routes=True,
             )
+            if [[a.stable_id or a.name for a in day.attractions] for day in updated_plan.days] != requested_orders:
+                raise ValueError("保存时景点顺序发生了意外变化，已取消保存，请重新生成修改建议")
             base = int(row["current_version"])
         with self._lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -186,6 +201,9 @@ class TripStoreService:
             if int(latest['current_version']) != base:
                 raise ValueError("行程已更新，请刷新后基于最新版本重新修改")
             version = base + 1
+            if updated_plan.revision_status in {"draft_ready", "applied"}:
+                updated_plan.revision_status = "applied"
+                updated_plan.revision_message = f"修改已保存为 v{version}。"
             connection.execute(
                 "INSERT INTO trip_versions VALUES (?, ?, ?, ?, ?)",
                 (trip_id, version, updated_plan.model_dump_json(), payload.change_note, now),

@@ -1,4 +1,4 @@
-"""Small allow-listed runtime traces. Never serialize prompts, URLs or tool arguments."""
+"""仅记录白名单中的少量运行事件，不序列化提示词、网址或工具参数。"""
 import contextvars
 import json
 import logging
@@ -65,15 +65,16 @@ def log(event):
 
 
 def process_metrics():
-    """Only this process since startup; executor task summaries persist separately."""
+    """这里只统计当前进程启动后的事件，执行器任务摘要单独持久化。"""
     import copy
     with _lock:
         return dict(scope='current_process_since_start', **copy.deepcopy(_process_metrics))
 
 
 @contextmanager
-def span(service, operation, **fields):
-    call_id, started = uuid4().hex[:12], time.monotonic()
+def span(service, operation, *, call_id=None, **fields):
+    # 原生工具调用沿用模型返回的调用标识，方便将执行耗时与工具结果关联。
+    call_id, started = call_id or uuid4().hex[:12], time.monotonic()
     emit(service,operation,'started',call_id=call_id,**fields)
     try:
         yield

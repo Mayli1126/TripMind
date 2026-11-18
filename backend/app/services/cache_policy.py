@@ -1,4 +1,4 @@
-"""Public fact cache policies. These windows are references, not freshness guarantees."""
+"""公共事实缓存策略，这些时间窗口是参考值，不保证数据仍然新鲜。"""
 from dataclasses import dataclass
 import math
 import random
@@ -7,7 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, model_validator
 
 CacheKind = Literal['poi', 'poi_detail', 'around', 'walking_route', 'transit_route',
-                    'driving_route', 'weather', 'opening_hours', 'official_policy', 'attraction_image']
+                    'driving_route', 'cycling_route', 'weather', 'opening_hours', 'official_policy', 'attraction_image']
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,7 @@ POLICIES: dict[str, CachePolicy] = {
     'poi_detail': CachePolicy(86400, 604800, True),
     'around': CachePolicy(86400, 604800, True),
     'walking_route': CachePolicy(3600, 21600, True),
+    'cycling_route': CachePolicy(3600, 21600, True),
     'transit_route': CachePolicy(300, 900),
     'driving_route': CachePolicy(300, 900),
     'weather': CachePolicy(600, 1800),
@@ -58,7 +59,7 @@ class CacheEnvelope(BaseModel):
 
 def make_entry(kind: CacheKind, data: Any, source: str, *, empty: bool = False,
                fetched_at: float | None = None, source_expires_at: float | None = None) -> CacheEnvelope:
-    """Call only after a successful provider response; never pass transport failures here."""
+    """仅在上游成功响应后调用，不能将网络传输失败作为结果传入。"""
     policy = POLICIES[kind]
     fetched = time.time() if fetched_at is None else fetched_at
     if kind == 'official_policy' and source_expires_at is None:
@@ -70,7 +71,7 @@ def make_entry(kind: CacheKind, data: Any, source: str, *, empty: bool = False,
         hard = min(hard, source_expires_at)
     if hard <= fetched:
         raise ValueError('Provider fact already expired')
-    # Jitter only the soft refresh point, never extend a provider's hard expiry.
+    # 仅对软刷新时刻添加随机扰动，不能延长上游数据的硬过期时间。
     fresh = hard if empty else min(hard, fetched + policy.fresh_seconds * random.uniform(.9, 1))
     return CacheEnvelope(outcome='empty' if empty else 'success', data=data, source=source,
                          fetched_at=fetched, fresh_until=fresh, hard_until=hard)

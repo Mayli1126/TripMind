@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional
+from typing import Optional
 
-from ..models.schemas import DayPlan, Location, Meal, TripPlan
+from ..models.schemas import DayPlan, Location, TripPlan
 from .amap_service import AmapService
 
 

@@ -1,4 +1,4 @@
-"""Reusable isolated executor. Cancellation kills only its process tree, never API/Redis."""
+"""可复用的隔离执行器；取消任务仅终止其子进程树，不影响 API 或 Redis。"""
 import json
 import os
 import queue
@@ -19,13 +19,15 @@ class ExecutorStopped(Exception):
 
 
 class ExecutorFailure(RuntimeError):
-    def __init__(self,error_type):
+    def __init__(self,error_type,public_message=None):
         self.error_type=error_type
+        # 只接受执行器明确标记的选点校验原因，不能透传一般异常的敏感内容。
+        self.public_message=public_message if error_type=='TourismResearchError' else None
         super().__init__(error_type)
 
 
 def terminate_posix_tree(pid):
-    # MCP deliberately starts its own sessions, so killing only our group is insufficient.
+    # MCP 会创建自己的会话，因此只终止当前进程组还不足以清理子进程。
     try:
         snapshot=subprocess.run(['ps','-eo','pid=,ppid='],capture_output=True,text=True,timeout=5,check=True)
     except (OSError,subprocess.SubprocessError):
@@ -67,7 +69,7 @@ def kill_tree(process):
 
 
 def contain_windows(process):
-    """A Job Object closes the entire child tree even if the API crashes."""
+    """即使 API 进程崩溃，Windows 作业对象也会关闭整棵子进程树。"""
     if os.name!='nt':
         return None
     import ctypes
@@ -87,7 +89,7 @@ def contain_windows(process):
     kernel.AssignProcessToJobObject.argtypes=[w.HANDLE,w.HANDLE]
     kernel.CloseHandle.argtypes=[w.HANDLE]
     handle=kernel.CreateJobObjectW(None,None)
-    info=Extended(); info.basic.flags=0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    info=Extended(); info.basic.flags=0x2000  # 关闭作业对象时终止整棵子进程树，对应 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE。
     if not handle or not kernel.SetInformationJobObject(handle,9,ctypes.byref(info),ctypes.sizeof(info)) or not kernel.AssignProcessToJobObject(handle,w.HANDLE(int(process._handle))):
         if handle: kernel.CloseHandle(handle)
         raise OSError(ctypes.get_last_error(),'executor_containment_failed')
@@ -119,7 +121,7 @@ class IsolatedExecutor:
                     try:
                         events.put(json.loads(line))
                     except ValueError:
-                        pass  # No unstructured output is copied into public diagnostics.
+                        pass  # 不向公开诊断信息复制非结构化输出。
             except (ValueError,OSError):
                 pass
             finally:
@@ -174,7 +176,7 @@ class IsolatedExecutor:
                     raise PlanningWaitingInput(event['data'])
                 elif kind in {'error','exit'}:
                     self.stop()
-                    raise ExecutorFailure(event.get('error_type','executor_exited'))
+                    raise ExecutorFailure(event.get('error_type','executor_exited'),event.get('public_message'))
 
     def stop(self):
         process, self.process = self.process, None

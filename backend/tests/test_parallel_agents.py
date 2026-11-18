@@ -9,7 +9,7 @@ def make_request(origin_city: str = "武汉") -> TripRequest:
     from datetime import date, timedelta
     start = date.today() + timedelta(days=30)
     return TripRequest(
-        destination_only=False,  # Legacy four-branch fan-out coverage.
+        destination_only=False,  # 覆盖旧版四分支并发查询流程。
         origin_city=origin_city,
         city="宜昌",
         start_date=start.isoformat(),

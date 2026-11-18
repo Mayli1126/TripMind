@@ -1,4 +1,4 @@
-"""Accurate attraction images: Amap POI photos (domestic-first) with Wikimedia/Unsplash fallbacks."""
+"""优先使用国内可访问的高德地点实拍图，再以 Wikimedia 和 Unsplash 补充景点图片。"""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def _image_cache_write(name: str, city: str, result: Optional[dict[str, Any]]) -
 
 
 class AttractionImageService:
-    """Prefer exact, attributable landmark images over visually unrelated stock photos."""
+    """优先使用地点匹配准确且来源可追溯的景点图，避免采用无关素材图。"""
 
     headers = {
         "User-Agent": "TripMind/1.0 (personal travel planner; local development)"

@@ -33,7 +33,7 @@
           <TaskDiagnostics v-if="revising" :job-id="jobId" :job="latestJob" @state="latestJob=$event" />
           <div v-if="waiting" class="proposal"><p>{{ waiting.question }}</p><button v-for="option in waiting.options" :key="option.value" :disabled="resuming" @click="resume(option.value)">{{ option.label }}</button></div>
           <div v-if="pending" class="review">
-            <h2>先看看这些修改</h2><RevisionDiff :changes="pending.plan.revision_diff || []" :explanation="pending.instruction" />
+            <h2>先看看这些修改</h2><RevisionDiff :changes="pending.plan.revision_diff || []" :explanation="pending.instruction" :plan="pending.plan" />
             <details><summary>查看修改后的逐日安排</summary><div v-for="(day, i) in pending.plan.days" :key="i" class="day"><strong>{{ day.date }}</strong><p>{{ day.attractions.map(place => place.name).join(' → ') }}</p></div></details>
             <div class="actions"><button :disabled="saving" @click="confirm">{{ saving ? '正在保存…' : '确认并保存新版本' }}</button><button class="ghost" :disabled="saving" @click="pending = null">放弃本次修改</button></div>
           </div>
@@ -48,6 +48,7 @@
 
 <script setup lang="ts">
 import TaskDiagnostics from '@/components/TaskDiagnostics.vue'
+import { revisionFailure } from '@/services/revision'
 import type { PlanningJobResponse } from '@/types'
 import ConversationSummary from '@/components/ConversationSummary.vue'
 import type { ConversationSummary as SummaryData } from '@/services/conversations'
@@ -99,7 +100,12 @@ async function load() {
       cloud.reset(record)
       conversationSummary.value = record.summary || null
       messages.value = record.snapshot?.messages || []
-      if (record.snapshot?.base_version === value.current_version) { pending.value = record.snapshot?.pending || null; activeRevision.value = record.snapshot?.activeRevision || null }
+      if (record.snapshot?.base_version === value.current_version) {
+        pending.value = record.snapshot?.pending || null
+        activeRevision.value = record.snapshot?.activeRevision || null
+        const failure = pending.value && revisionFailure(pending.value.plan)
+        if (failure) { pending.value = null; messages.value.push({ role: 'assistant', content: failure }) }
+      }
       else messages.value.push({ role: 'assistant', content: `行程现为 v${value.current_version}，历史问答供参考，旧修改草稿不会自动应用。` })
     }
     hydrated.value = true
@@ -139,7 +145,16 @@ async function observeRevision(active: { job: string; instruction: string; versi
       snapshot => { latestJob.value=snapshot;progressMessage.value = snapshot.message; if (snapshot.status !== 'waiting_input') waiting.value = null })
     jobId.value = active.job; cancel = waiter.cancel
     const plan = await waiter
-    if (current === generation) { pending.value = { plan, instruction: active.instruction, version: active.version }; activeRevision.value = null }
+    if (current === generation) {
+      activeRevision.value = null
+      const failure = revisionFailure(plan)
+      if (failure) {
+        pending.value = null
+        messages.value.push({ role: 'assistant', content: failure })
+      } else {
+        pending.value = { plan, instruction: active.instruction, version: active.version }
+      }
+    }
   } catch (cause:any) { if (current === generation) { if(cause?.name==='JobCancelled'){activeRevision.value=null;messages.value.push({role:'assistant',content:'本次修改已取消，原计划未改变。'});error.value=''}else fail(cause) } }
   finally { if (current === generation) { revising.value = false; waiting.value = null; void scroll() } }
 }
@@ -151,6 +166,8 @@ async function resume(value: string) {
 }
 async function confirm() {
   if (!trip.value || !pending.value || saving.value) return
+  const failure = revisionFailure(pending.value.plan)
+  if (failure) { pending.value = null; error.value = failure; return }
   saving.value = true; error.value = ''
   try {
     trip.value = await saveTripVersion(trip.value.id, pending.value.plan, `对话修改：${pending.value.instruction}`.slice(0, 500), pending.value.version)

@@ -1,4 +1,4 @@
-"""Bounded real MCP handshake smoke check, without package downloads or LLM calls."""
+"""执行有时间限制的真实 MCP 握手检查，不下载依赖包或调用模型。"""
 from app.infrastructure.mcp_runtime import amap_runtime
 from app.infrastructure.mcp_client import MCPClientManager
 

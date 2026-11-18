@@ -1,11 +1,11 @@
-"""Redis supervisor: fenced lease, heartbeat, pending recovery and isolated execution."""
+"""Redis 任务监管器，提供租约所有权校验、心跳、待确认消息恢复和隔离执行。"""
 from __future__ import annotations
 import json
 import threading
 import time
 from uuid import uuid4
 from ..infrastructure import redis_client
-from ..models.schemas import TripPlan, TripRequest
+from ..models.schemas import TripPlan
 
 _STOP=threading.Event()
 _THREAD=None
@@ -33,16 +33,16 @@ def _execute(message_id, fields, recovered=False):
     if state.get("status")=="waiting_input" and job_type!="resume":
         redis_client.ack_job(message_id); return
     if state.get("status")=="retrying" and attempt<=int(state.get('attempt') or 0):
-        # A crash after scheduling a retry must not execute both copies.
+        # 安排重试后即使崩溃，也不能导致原任务与重试副本同时执行。
         redis_client.ack_job(message_id); return
     token=uuid4().hex
     if not redis_client.acquire_job_lease(job_id,token):
-        return  # Leave PEL entry intact until its live owner finishes or expires.
+        return  # 保留待确认队列记录，直到当前存活持有者完成任务或租约过期。
     recorder=RedisJobRecorder(job_id,token)
     acknowledge=False
     try:
         from ..config import get_settings
-        # Legacy outstanding jobs have no admission record: require draining before rollout.
+        # 旧版未完成任务没有准入记录，上线前必须先清空存量任务。
         if float(state.get('admission_until') or 0) <= time.time():
             recorder.fail('任务等待或确认时间已过期，请重新提交')
             acknowledge=True; return
@@ -78,7 +78,7 @@ def _execute(message_id, fields, recovered=False):
     except JobCancelled:
         recorder.cancel(); acknowledge=True
     except ExecutorStopped:
-        # Shutdown/lost lease: do not ACK. Another supervisor reclaims the PEL entry.
+        # 关闭或失去租约时不确认消息，由其他监管进程接管待确认记录。
         pass
     except Exception as exc:
         if redis_client.owns_job_lease(job_id,token):
@@ -87,13 +87,16 @@ def _execute(message_id, fields, recovered=False):
             else:
                 recorder.diagnostic(dict(trace_id=job_id,run_id=token,service="runtime",operation="execute",
                     status="failed",error_type=getattr(exc,'error_type',type(exc).__name__)))
-                if redis_client.schedule_retry(job_id,job_type,payload,attempt):
+                if getattr(exc,'error_type','') == 'TourismResearchError':
+                    # 依据不足、额度、权限等已明确失败，不自动重跑付费搜索。
+                    recorder.fail(getattr(exc,'public_message',None) or '联网选点未通过核验，请调整需求后重试')
+                elif redis_client.schedule_retry(job_id,job_type,payload,attempt):
                     recorder.update(0,"retrying","执行中断，已安排自动重试","retrying")
                 else:
                     recorder.fail(f"执行失败（{type(exc).__name__}），任务编号 {job_id}")
             acknowledge=True
     finally:
-        # Only ACK while fenced; an old worker can never consume its replacement's message.
+        # 只有所有权校验通过时才能确认消息，旧执行器不能消费替代执行器的消息。
         if acknowledge and redis_client.owns_job_lease(job_id,token):
             if (redis_client.get_job_state(job_id) or {}).get('status')=='cancelling':
                 recorder.cancel()
@@ -103,7 +106,7 @@ def _execute(message_id, fields, recovered=False):
 
 def process_once(block_ms=0):
     global _LAST_RECLAIM
-    redis_client.pop_due_retries()  # Atomic promotion into the stream, no second enqueue.
+    redis_client.pop_due_retries()  # 原子转移到消息流，不进行第二次入队。
     entries=[]
     if time.monotonic()-_LAST_RECLAIM>=5:
         _LAST_RECLAIM=time.monotonic()

@@ -1,4 +1,4 @@
-"""Bounded event summaries. Counts are events, not billing or exact HTTP requests."""
+"""有容量限制的事件摘要；计数表示事件数量，不等于计费次数或准确 HTTP 请求数。"""
 def summarize_event(data, event):
     operations = data.setdefault('operations', {})
     key = f"{event.get('service','runtime')}:{event.get('operation','unknown')}"[:160]

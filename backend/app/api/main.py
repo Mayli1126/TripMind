@@ -91,7 +91,7 @@ async def startup_event():
         except Exception:
             maps_ready = False
             print("地图预热未完成：账号和历史行程仍可访问，暂不启动规划 Worker。")
-    # Start the worker only after startup preparation, so queued jobs don't race tool installation.
+    # 启动准备完成后再启动任务执行器，避免排队任务与工具安装争抢资源。
     if settings.redis_enabled and maps_ready:
         from ..infrastructure import redis_client
         from ..services.planning_worker import start_worker

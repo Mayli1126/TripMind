@@ -1,4 +1,4 @@
-"""Conversational trip setup; final requests reuse the existing planner contract."""
+"""通过对话收集旅行需求，最终请求复用既有规划数据契约。"""
 
 from typing import Any, Literal
 

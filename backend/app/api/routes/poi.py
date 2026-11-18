@@ -1,8 +1,8 @@
 """POI相关API路由"""
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel
+from typing import Optional
 from ...services.amap_service import get_amap_service
 from ...services.attraction_image_service import attraction_image_service
 from starlette.concurrency import run_in_threadpool
@@ -27,10 +27,10 @@ async def get_poi_detail(poi_id: str):
     """
     获取POI详情
     
-    Args:
-        poi_id: POI ID
+    参数：
+        poi_id: 地点标识
         
-    Returns:
+    返回：
         POI详情响应
     """
     try:
@@ -63,11 +63,11 @@ async def search_poi(keywords: str, city: str = "北京"):
     """
     搜索POI
 
-    Args:
+    参数：
         keywords: 搜索关键词
         city: 城市名称
 
-    Returns:
+    返回：
         搜索结果
     """
     try:
@@ -97,10 +97,10 @@ async def get_attraction_photo(name: str, city: str = ""):
     """
     获取景点图片
 
-    Args:
+    参数：
         name: 景点名称
 
-    Returns:
+    返回：
         图片URL
     """
     try:

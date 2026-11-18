@@ -1,4 +1,4 @@
-// Lightweight regressions with Node's built-in assertions; no test dependency added.
+// 使用 Node 内置断言进行轻量回归，不增加测试依赖。
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const vm = require('node:vm')

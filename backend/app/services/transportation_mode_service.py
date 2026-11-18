@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict
 
-from ..models.schemas import Attraction, DayPlan, Location, TripPlan
+from ..models.schemas import DayPlan, Location, TripPlan
 
 
 class TransportationModeService:
@@ -33,7 +33,7 @@ class TransportationModeService:
     def calculate_transport_between_points(self, loc1: Location, loc2: Location) -> Dict[str, float]:
         """计算两点间的交通方式和时间。
         
-        Returns:
+        返回：
             dict: {"mode": 交通方式, "duration_minutes": 分钟, "distance_km": 公里}
         """
         distance = self._haversine_distance(loc1, loc2)
@@ -78,8 +78,6 @@ class TransportationModeService:
         if len(day.attractions) < 2:
             return day
 
-        total_time = 0
-        total_cost = 0
         transport_details = []
 
         # 计算景点间交通
@@ -89,8 +87,6 @@ class TransportationModeService:
             
             if current.location and next_attr.location:
                 transport = self.calculate_transport_between_points(current.location, next_attr.location)
-                total_time += transport["duration_minutes"]
-                total_cost += transport["cost"]
                 transport_details.append(transport)
 
         # 更新当日交通信息

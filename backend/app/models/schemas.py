@@ -209,6 +209,14 @@ class TransportationRequest(BaseModel):
 from .advisory import AttractionAdvisory
 
 
+class RouteAnchor(BaseModel):
+    """经过地图身份及父子关系核验的游览起终点，不是独立新增景点。"""
+    poi_id: str
+    name: str
+    location: Location
+    source: str = "amap_parent_relation"
+
+
 class Attraction(BaseModel):
     """景点信息"""
     stable_id: str = Field(default="", description="计划内稳定 ID，Patch 操作据此定位，为空时由 patch_service 补全")
@@ -223,6 +231,18 @@ class Attraction(BaseModel):
     photos: Optional[List[str]] = Field(default_factory=list, description="景点图片URL列表")
     poi_id: Optional[str] = Field(default="", description="POI ID")
     image_url: Optional[str] = Field(default=None, description="图片URL")
+    recommendation_sources: List[str] = Field(default_factory=list, description="选点依据的真实网页链接，不代表门票或开放时间已核实")
+    match_evidence: Dict[str, Any] = Field(default_factory=dict, description="地点身份匹配依据")
+    parent_poi_id: str = Field(default="", description="地图明确返回的父级地点ID")
+    visit_mode: Literal["classic", "deep"] = "classic"
+    duration_reason: str = Field(default="", description="Planner估计游玩时长的理由")
+    duration_source: Literal["ai_estimate", "user_confirmed"] = "ai_estimate"
+    suitable_time: Literal["day", "evening", "night", "any", "unknown"] = "unknown"
+    proposed_entry_name: str = ""
+    proposed_exit_name: str = ""
+    route_entry: Optional[RouteAnchor] = None
+    route_exit: Optional[RouteAnchor] = None
+    route_anchors_checked: bool = False
     ticket_price: Optional[int] = Field(default=None, ge=0, description="门票参考价(元/人)，未知为null，0仅代表明确免费参考")
     ticket_price_source: str = Field(default='unknown', description='unknown/static_reference/estimate')
     ticket_price_note: str = ''
@@ -247,6 +267,7 @@ class Meal(BaseModel):
 class Hotel(BaseModel):
     """酒店信息"""
     name: str = Field(..., description="酒店名称")
+    poi_id: str = Field(default="", description="已核对酒店地点的高德 POI ID")
     address: str = Field(default="", description="酒店地址")
     location: Optional[Location] = Field(default=None, description="酒店位置")
     price_range: str = Field(default="", description="价格范围")
@@ -255,6 +276,7 @@ class Hotel(BaseModel):
     type: str = Field(default="", description="酒店类型")
     estimated_cost: int = Field(default=0, ge=0, description="预估费用(元/间/晚)")
     price_source: str = 'estimate'
+    price_policy: Literal['auto', 'budget_only'] = Field(default='auto', description='快速酒店只预留档次预算，禁止收尾再查消费或调用模型估价')
     amap_average_cost: Optional[float] = Field(default=None, ge=0)
     price_note: str = '住宿档次预算预留，不是该酒店或入住日期的实时报价'
 
@@ -285,13 +307,16 @@ class RouteLeg(BaseModel):
     cost_source: str = "heuristic"
     checked_at: str = ""
     note: str = ""
+    transport_label: str = ""
+    comparison_note: str = ""
 
 
 class ScheduleItem(BaseModel):
-    """按时间排序的单日执行步骤。"""
+    """按游玩顺序排列的步骤；保留旧钟点字段以兼容历史记录。"""
 
-    start_time: str
-    end_time: str
+    # 新规划只表达顺序和耗时；钟点字段仅用于读取历史时间表。
+    start_time: str = ""
+    end_time: str = ""
     item_type: Literal["meal", "transport", "attraction", "hotel", "break"]
     title: str
     description: str = ""
@@ -302,8 +327,12 @@ class ScheduleItem(BaseModel):
     stable_id: str = ""
     start_day_offset: int = Field(default=0, ge=0, le=7)
     end_day_offset: int = Field(default=0, ge=0, le=7)
-    suggested_transport: str = Field(default="", description="建议交通方式: 步行/地铁/公交/打车/专车")
+    suggested_transport: str = Field(default="", description="建议交通方式: 步行/骑行/驾车/公共交通")
     route_leg: Optional[RouteLeg] = None
+    route_origin: Optional[Location] = None
+    route_destination: Optional[Location] = None
+    route_reference_time: str = "10:00"
+    selected_route_mode: Literal["walking", "cycling", "driving", "transit", ""] = ""
 
 
 class DayPlan(BaseModel):
@@ -315,12 +344,19 @@ class DayPlan(BaseModel):
     accommodation: str = Field(..., description="住宿")
     hotel: Optional[Hotel] = Field(default=None, description="推荐酒店")
     attractions: List[Attraction] = Field(default_factory=list, description="景点列表")
-    meals: List[Meal] = Field(default_factory=list, description="餐饮列表")
+    meals: List[Meal] = Field(default_factory=list, description="历史餐饮字段；新规划仅提供游玩与交通，返回空列表")
     route_summary: Optional[DailyRouteSummary] = Field(default=None, description="当日路线优化摘要")
     theme: str = Field(default="", description="当日主题")
     pace: str = Field(default="", description="当日节奏: relaxed/standard/intense（Patch 可修改）")
     preferred_start_time: str = Field(default="", description="当日偏好出发时间 HH:MM（Patch 可修改）")
-    schedule: List[ScheduleItem] = Field(default_factory=list, description="按时间排序的精细行程")
+    arrangement_reason: str = Field(default="", description="Planner选择当天地点组合的原因")
+    single_place_reason: str = Field(default="", description="一天只选一个地点时的安排理由")
+    schedule_mode: Literal["duration", "timed"] = Field(default="duration", description="顺序时长模式；timed仅兼容历史时间表")
+    visit_minutes: int = Field(default=0, ge=0, description="当天建议游玩总分钟数")
+    transport_minutes: int = Field(default=0, ge=0, description="当天逐段交通参考分钟数，含酒店接驳")
+    total_minutes: int = Field(default=0, ge=0, description="游玩与交通合计，不含用户自行安排的用餐")
+    timing_notes: List[str] = Field(default_factory=list, description="适宜时段及用户明确的时间限制，不代表预约已核验")
+    schedule: List[ScheduleItem] = Field(default_factory=list, description="按游玩顺序排列的地点及交通耗时参考")
 
 
 class WeatherInfo(BaseModel):
@@ -425,7 +461,9 @@ class TripPlan(BaseModel):
     is_fallback: bool = Field(default=False, description="是否为降级计划")
     warnings: List[str] = Field(default_factory=list, description="数据与可执行性警告")
     data_sources: List[DataSource] = Field(default_factory=list, description="数据来源")
-    revision_diff: List[RevisionChange] = Field(default_factory=list, description="最近一次 AI 修改的差异摘要（前端确认用）")
+    revision_diff: List[RevisionChange] = Field(default_factory=list, description="最近一次手动或 AI 修改的差异摘要（前端确认用）")
+    revision_status: Optional[Literal["draft_ready", "applied", "rejected", "unchanged", "clarify_needed"]] = None
+    revision_message: str = ""
     optimization_summary: Optional[OptimizationSummary] = Field(default=None, description="路线优化摘要")
     planning_iterations: int = Field(default=1, ge=1, le=2, description="Planner执行轮次")
     intercity_journey: Optional[IntercityJourney] = Field(
@@ -467,6 +505,9 @@ class POIInfo(BaseModel):
     id: str = Field(..., description="POI ID")
     name: str = Field(..., description="名称")
     type: str = Field(..., description="类型")
+    city_name: str = Field(default="", description="地图返回的所属城市；缺失时不能宣称已完成同城校验")
+    type_code: str = Field(default="", description="高德原始类别编码，用于过滤非游玩设施")
+    parent_poi_id: str = Field(default="", description="地图明确提供的父级POI，不由坐标推测")
     address: str = Field(..., description="地址")
     location: Location = Field(..., description="经纬度坐标")
     tel: Optional[str] = Field(default=None, description="电话")
@@ -666,14 +707,6 @@ class TripProgressResponse(BaseModel):
     trip_id: str
     items: List[TripProgressItem] = Field(default_factory=list)
 
-
-# ============ 错误响应 ============
-
-class ErrorResponse(BaseModel):
-    """错误响应"""
-    success: bool = Field(default=False, description="是否成功")
-    message: str = Field(..., description="错误消息")
-    error_code: Optional[str] = Field(default=None, description="错误代码")
 
 # ============ 候选池契约接线（阶段 2） ============
 # schemas 顶部不能直接 import candidate（candidate 依赖本模块的 Location），

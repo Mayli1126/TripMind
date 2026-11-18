@@ -1,4 +1,4 @@
-"""Date/time-scoped Amap road routes. Prices are references, never ticket quotes."""
+"""按日期时间查询高德道路路线，价格仅供参考，不是票务报价。"""
 from collections import OrderedDict
 from datetime import datetime, timezone
 from math import ceil, isfinite
@@ -28,16 +28,34 @@ class _NoRoadRoute(Exception):
 
 
 class RoadRouteResolver:
-    """One resolver per build; limit calls and stop new work at its deadline."""
-    def __init__(self, city, enabled=True, preference=""):
+    """每轮构建使用一个路线解析器，限制调用次数并在截止时间后停止新查询。"""
+    def __init__(self, city, enabled=True, preference="", *, compare_modes=False,
+                 optimization_goal="balanced", travelers=1, allow_taxi=True):
         self.city = city
         self.preference = preference
         self.settings = get_settings()
         self.enabled = enabled and self.settings.road_routes_enabled
         self.deadline = monotonic() + max(0, self.settings.road_routes_max_seconds)
         self.calls = 0
+        # 旧调用参数保留兼容；备选方式改由用户展开查询，不再自动比较打车。
+        self.compare_modes = compare_modes
+        self.optimization_goal = optimization_goal
+        self.travelers = max(1, travelers)
+        self.allow_taxi = allow_taxi
 
     def resolve(self, start, end, date, time, preference=""):
+        # 默认只取一种方式；其他方式由用户展开时查询，不再自动切换为打车。
+        return self._resolve_mode(start, end, date, time, preference)
+
+    @staticmethod
+    def route_mode(preference, distance):
+        if preference in {"walking", "cycling", "driving", "transit"}:
+            return preference
+        if "自驾" in preference or preference in {"打车", "专车", "taxi"}:
+            return "driving"
+        return "walking" if distance < 1.5 else "transit"
+
+    def _resolve_mode(self, start, end, date, time, preference=""):
         if not self.settings.cache_enabled or not (start and end and self.enabled and self.settings.amap_api_key):
             return self._resolve(start, end, date, time, preference)
         from ..infrastructure.shared_cache import make_key
@@ -47,11 +65,11 @@ class RoadRouteResolver:
         if not all(isfinite(v) for p in (start, end) for v in (p.longitude, p.latitude)):
             return self._resolve(start, end, date, time, preference)
         pref = self.preference or preference
-        self_drive = '自驾' in pref or pref == 'driving'
+        self_drive = '自驾' in pref or pref in ('driving', 'taxi', '打车', '专车')
         driving = self_drive or pref in ('打车', '专车', 'taxi')
-        mode = 'driving' if driving else 'walking' if route_optimizer.distance(start, end) < 1.5 else 'transit'
+        mode = self.route_mode(pref, route_optimizer.distance(start, end))
         bucket = f'{time[:3]}{int(time[3:]) // 30 * 30:02d}'
-        key = make_key(f'{mode}_route', dict(provider='amap', api='v3/direction',
+        key = make_key(f'{mode}_route', dict(provider='amap', api='v4/direction/bicycling' if mode == 'cycling' else 'v3/direction',
             policy='coordinates6-time30-v1', city=self.city.strip(), date=date, departure=bucket,
             mode=mode, self_drive=self_drive, strategy=0, extensions='all',
             origin=f'{start.longitude:.6f},{start.latitude:.6f}',
@@ -83,21 +101,21 @@ class RoadRouteResolver:
                   and (p.longitude != 0 or p.latitude != 0) for p in (start, end))
         distance = route_optimizer.distance(start, end) if valid else 0
         preference = self.preference or preference
-        self_drive = "自驾" in preference or preference == "driving"
+        self_drive = "自驾" in preference or preference in ("driving", "taxi", "打车", "专车")
         driving = self_drive or preference in ("打车", "专车", "taxi")
-        mode = "driving" if driving else "walking" if valid and distance < 1.5 else "transit"
-        # Conservative road detour and boarding buffer, explicitly labelled as fallback.
+        mode = self.route_mode(preference, distance)
+        # 保守估算道路绕行和上车缓冲，并明确标记为降级估算。
         km = distance * (1.25 if mode == "walking" else 1.4)
         minutes = max(5, ceil(km / (4.5 if mode == "walking" else 22) * 60)
                       + (12 if mode == "transit" else 5)) if valid else 30
         fallback = RouteLeg(mode=mode, distance_km=round(km, 2), duration_minutes=minutes,
-                            cost=15 if not valid else 0 if mode == "walking" else km * .8 if self_drive else max(12, km * 2.5) if driving else 5,
+                            cost=15 if not valid else 0 if mode in {"walking", "cycling"} else km * .8 if self_drive else max(12, km * 2.5) if driving else 5,
                             cost_unit="vehicle" if driving else "person",
                             note="坐标绕行估算，非道路导航；费用为经验参考" if valid else "缺少接驳坐标，暂按30分钟及参考费用预留")
         if fallback_only or not (valid and self.enabled and self.settings.amap_api_key):
             emit('map_route','fallback','degraded',reason='missing_coordinates' if not valid else 'not_enabled')
             return fallback
-        # Direction, date, 30-minute departure bucket and mode are all cache dimensions.
+        # 缓存维度包含方向、日期、按三十分钟分桶的出发时间和交通方式。
         bucket = f"{time[:3]}{int(time[3:]) // 30 * 30:02d}"
         key = (self.city, date, bucket, mode, self_drive, *(round(v, 6) for p in (start, end)
                                                 for v in (p.longitude, p.latitude)))
@@ -127,20 +145,23 @@ class RoadRouteResolver:
                       origin=f"{start.longitude:.6f},{start.latitude:.6f}",
                       destination=f"{end.longitude:.6f},{end.latitude:.6f}", extensions="all")
         path = "transit/integrated" if mode == "transit" else mode
+        url = f"https://restapi.amap.com/v3/direction/{path}"
+        if mode == "cycling":
+            url = "https://restapi.amap.com/v4/direction/bicycling"
         if mode == "transit":
             params.update(city=self.city, cityd=self.city, date=date, time=bucket, strategy=0)
         try:
-            # Socket timeouts plus build deadline prevent unbounded sequential queries.
+            # 网络超时与本轮构建截止时间共同防止顺序查询无限等待。
             with httpx.Client(timeout=min(2, remaining), follow_redirects=False) as client:
                 with span('map_route','direction'):
                     from ..infrastructure.provider_guard import map_http
-                    response = map_http(lambda: client.get(f"https://restapi.amap.com/v3/direction/{path}", params=params))
+                    response = map_http(lambda: client.get(url, params=params))
                     response.raise_for_status()
                     payload = response.json()
-            if str(payload.get("status")) != "1":
+            if (str(payload.get("errcode")) != "0" if mode == "cycling" else str(payload.get("status")) != "1"):
                 emit('map_route','fallback','degraded',reason='provider_rejected')
                 return fallback
-            route = payload["route"]
+            route = payload["data"] if mode == "cycling" else payload["route"]
             choices = route.get("transits" if mode == "transit" else "paths")
             if not isinstance(choices, list):
                 raise ValueError('Missing route list')
@@ -149,13 +170,13 @@ class RoadRouteResolver:
             part = choices[0]
             seconds = float(part["duration"])
             if mode == "transit":
-                # route.distance is walking-only, not the complete transit journey.
+                # route.distance 只表示步行距离，不代表整段公共交通行程。
                 meters = sum(float(s.get("walking", {}).get("distance") or 0)
                              + sum(float(b.get("distance") or 0) for b in s.get("bus", {}).get("buslines", [])[:1])
                              for s in part.get("segments", []))
             else:
                 meters = float(part["distance"])
-            raw_cost = (meters / 1000 * .8 + float(part.get("tolls") or 0)) if self_drive else 0 if mode == "walking" else route.get("taxi_cost") if driving else part.get("cost")
+            raw_cost = (meters / 1000 * .8 + float(part.get("tolls") or 0)) if self_drive else 0 if mode in {"walking", "cycling"} else route.get("taxi_cost") if driving else part.get("cost")
             cost = float(raw_cost) if raw_cost not in (None, "", []) else fallback.cost
             if not all(isfinite(v) and v >= 0 for v in (seconds, meters, cost)) or seconds <= 0:
                 return fallback

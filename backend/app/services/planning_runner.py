@@ -1,7 +1,6 @@
-"""Child-only graph execution. stdout is an internal JSON channel, never application logs."""
+"""仅在子进程内执行规划图，标准输出用于内部 JSON 通信，不作应用日志。"""
 import json
 import os
-import signal
 import subprocess
 import sys
 import threading
@@ -10,7 +9,7 @@ import time
 
 def main():
     output = sys.stdout
-    sys.stdout = sys.stderr  # Legacy prints are discarded by the supervisor, not published.
+    sys.stdout = sys.stderr  # 旧代码的打印内容由监管进程丢弃，不对外发布。
     from ..infrastructure import task_trace
     from ..models.schemas import TripPlan, TripRequest
     from ..graphs.planning_graph import PlanningWaitingInput, run_planning_graph
@@ -53,7 +52,7 @@ def main():
                     if not redis_client.owns_job_lease(*lease):
                         terminate_self()
                 except Exception:
-                    terminate_self()  # Fail closed: an unfenced child must never keep generating.
+                    terminate_self()  # 失去所有权校验的子进程必须停止，不能继续生成。
             time.sleep(2)
     threading.Thread(target=watchdog,daemon=True,name='executor-guardian').start()
     for line in sys.stdin:
@@ -84,7 +83,9 @@ def main():
         except PlanningWaitingInput as wait:
             send('waiting_input',job_id,data=wait.question)
         except BaseException as exc:
-            send('error',job_id,error_type=type(exc).__name__)
+            from .tourism_research_service import TourismResearchError
+            send('error',job_id,error_type=type(exc).__name__,
+                 public_message=str(exc)[:300] if isinstance(exc,TourismResearchError) else None)
         finally:
             guard['lease']=None
             task_trace.deactivate()

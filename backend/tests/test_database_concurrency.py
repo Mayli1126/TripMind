@@ -1,4 +1,4 @@
-"""Independent connections/locks against a disposable SQLite database."""
+"""使用临时 SQLite 数据库验证独立连接和锁。"""
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -21,7 +21,7 @@ class DatabaseConcurrencyChecks(TestCase):
         self.addCleanup(temp.cleanup)
         self.path = Path(temp.name) / 'concurrency.db'
         self.first = TripStoreService(self.path)
-        self.second = TripStoreService(self.path)  # Not the same Python lock.
+        self.second = TripStoreService(self.path)  # 使用不同的 Python 锁，模拟独立写入方。
         request = make_request()
         self.plan = TripPlan(city=request.city, start_date=request.start_date, end_date=request.end_date,
                              days=[make_day(0, 10), make_day(1, 20)], overall_suggestions='fixture')
@@ -30,7 +30,7 @@ class DatabaseConcurrencyChecks(TestCase):
     def test_racing_versions_one_wins_and_no_write_lock_during_provider(self):
         barrier = Barrier(2)
         def finalize(plan, *args, **kwargs):
-            # A separate writer must be able to acquire the database during slow enrichment.
+            # 慢速数据补充期间，独立写入方仍应能够获取数据库写入权限。
             with self.first._connection() as db:
                 db.execute('BEGIN IMMEDIATE')
             barrier.wait(timeout=5)

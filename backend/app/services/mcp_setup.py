@@ -1,4 +1,4 @@
-"""Explicit deployment commands: prepare tool cache, or diagnose without downloading."""
+"""显式部署命令：准备工具缓存，或在不下载的情况下执行诊断。"""
 
 import argparse
 import json
@@ -14,7 +14,7 @@ def prepare(timeout):
     settings = get_settings()
     if not settings.amap_api_key or settings.amap_api_key.startswith("your_"):
         raise RuntimeError("请先在 backend/.env 配置高德 Web 服务 Key。")
-    # Download with a single process, then verify the same command works offline.
+    # 先由单个进程下载，再确认同一条命令可以离线执行。
     for allow_install, pool_size in ((True, 1), (False, settings.mcp_pool_size)):
         print("准备固定版本地图工具（此步骤允许下载）" if allow_install else "确认离线缓存与所有地图会话")
         command, env = amap_runtime(allow_install=allow_install)

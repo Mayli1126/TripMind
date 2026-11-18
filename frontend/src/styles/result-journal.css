@@ -1,5 +1,5 @@
-/* TripMind route journal. Unslop craft guidance adapted from Damir Sokolovsky
-   (@heydamir), CC BY 4.0. Photos, map and route order carry the visual emphasis. */
+/* TripMind 路线手账。界面设计参考 Damir Sokolovsky 的 Unslop 指南，
+   署名 @heydamir，遵循 CC BY 4.0 许可；视觉重点为图片、地图和路线顺序。 */
 .result-container {
   --paper: #fff;
   --canvas: #f5f8fa;
@@ -164,7 +164,7 @@
 .result-container button:focus-visible { outline: 2px solid #167c80; outline-offset: 3px; }
 .stop-row:focus-visible { outline-offset: -2px; }
 .result-container { font-variant-numeric: tabular-nums; }
-/* Restore the layered attraction overview; keep the newer workspace below. */
+/* 恢复分层景点概览，并保留下方新版工作区。 */
 .result-container :deep(.cover-card) { box-shadow: 0 8px 24px #182a341a; }
 .result-container :deep(.cover-name) { font-weight: 600; }
 .result-container :deep(.cover-index) { top: 16px; bottom: auto; left: 16px; padding: 4px 8px; font-size: 12px; font-weight: 500; letter-spacing: 0; border-radius: 4px; }
@@ -240,7 +240,7 @@
 .hotel-row-copy strong { font-size:16px; line-height:1.5; font-weight:600; overflow-wrap:anywhere; }
 .hotel-detail-label,.hotel-location-note { color:#607682; font-size:12px; line-height:1.8; }
 
-/* Selected A-v2: independent chat dock, compact route and image-led details. */
+/* 采用 A-v2 方案：独立对话栏、紧凑路线和以图片为主的详情。 */
 .result-container.with-assistant { padding-left: 388px; }
 .assistant-dock { position: fixed; top: 72px; bottom: 0; left: 0; width: 360px; display: flex; flex-direction: column; min-height: 0; background: white; border-right: 1px solid #e0eaf0; z-index: 70; }
 .assistant-dock-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 18px 20px; border-bottom: 1px solid #edf2f5; flex-shrink: 0; }

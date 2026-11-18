@@ -1,4 +1,4 @@
-"""Travel advice is distinct from map identity verification."""
+"""旅行提醒与地图地点身份核验是两类独立信息。"""
 from typing import Literal
 from pydantic import BaseModel, Field
 

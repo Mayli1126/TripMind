@@ -48,13 +48,17 @@ class CandidatePlace(BaseModel):
     canonical_name: str = Field(..., description="归一化后的标准名称（以地图数据为准）")
     aliases: list[str] = Field(default_factory=list, description="各来源中的别名/简称")
     city: str
+    address: str = Field(default="", description="地图核对后的真实地址")
     poi_id: Optional[str] = Field(default=None, description="高德 POI ID，命中即视为 verified")
     location: Optional[Location] = Field(default=None, description="无坐标时必须保持 None")
     category: CandidateCategory = "attraction"
+    suitable_time: Literal["day", "evening", "night", "any", "unknown"] = "unknown"
     suggested_duration_minutes: int = Field(default=90, ge=15, le=720)
     source_refs: list[str] = Field(default_factory=list, description="来源引用: guide:{id} / template:{slug} / amap:{poi_id}")
     recommendation_reasons: list[str] = Field(default_factory=list, description="为什么推荐（来自攻略或偏好匹配）")
     warnings: list[str] = Field(default_factory=list, description="已知风险: 需预约/闭馆日/体力强度等")
+    match_evidence: dict = Field(default_factory=dict, description="本轮地点匹配方法、名称及依据，不表示营业事实已核实")
+    parent_poi_id: str = Field(default="", description="地图明确返回的所属景区ID，缺失时不按距离猜测包含关系")
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     user_choice: UserChoice = "preferred"
     fact_status: FactStatus = "unverified"

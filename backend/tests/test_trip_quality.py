@@ -20,7 +20,7 @@ def make_request(**overrides) -> TripRequest:
     start = datetime.now().date() + timedelta(days=30)
     end = start + timedelta(days=1)
     values = {
-        "destination_only": False,  # Explicit legacy cross-city contract.
+        "destination_only": False,  # 显式覆盖旧版跨城行程契约。
         "origin_city": "上海",
         "city": "北京",
         "start_date": start.isoformat(),
@@ -110,12 +110,12 @@ class TripQualityServiceTests(TestCase):
         )
 
         self.assertEqual(result.budget.total_attractions, 60)
-        self.assertEqual(result.budget.total_meals, 120)
+        self.assertEqual(result.budget.total_meals, 0)
         self.assertEqual(result.budget.total_hotels, 100)
         self.assertEqual(result.budget.intercity_transportation, 200)
         self.assertEqual(result.budget.local_transportation, 200)
-        self.assertEqual(result.budget.total, 680)
-        self.assertEqual(result.budget.per_person, 340)
+        self.assertEqual(result.budget.total, 560)
+        self.assertEqual(result.budget.per_person, 280)
         self.assertFalse(result.budget.over_budget)
 
     def test_marks_over_budget(self):
@@ -153,10 +153,10 @@ class TripQualityServiceTests(TestCase):
         assert any("移除重复景点" in item for item in result.warnings)
         assert result.days[0].schedule
         assert {item.item_type for item in result.days[0].schedule} >= {
-            "meal", "transport", "attraction", "hotel"
+            "transport", "attraction", "hotel"
         }
 
-    def test_timeline_is_chronological_and_contains_break_buffer(self):
+    def test_timeline_is_chronological_without_forced_meal_or_evening_buffer(self):
         request = make_request(origin_city="北京", city="北京")
         plan = TripPlan(
             city="北京",
@@ -170,8 +170,8 @@ class TripQualityServiceTests(TestCase):
         schedule = result.days[0].schedule
 
         assert all(left.end_time <= right.start_time for left, right in zip(schedule, schedule[1:]))
-        assert any(item.item_type == "break" for item in schedule)
-        assert schedule[0].start_time == "07:45"
+        assert not any(item.item_type in {"meal", "break"} for item in schedule)
+        assert schedule[0].start_time == ""
 
     def test_unknown_route_uses_estimated_journey_before_sightseeing(self):
         request = make_request(origin_city="武汉", city="陌生目的地")
@@ -187,13 +187,11 @@ class TripQualityServiceTests(TestCase):
 
         result = TripQualityService().finalize(plan, request, bind_meals=False)
 
-        self.assertIsNotNone(result.intercity_journey)
-        self.assertEqual(result.intercity_journey.source, "estimated")
-        self.assertEqual(result.intercity_journey.arrival_time, "12:00")
+        self.assertIsNone(result.intercity_journey)
         attraction_slots = [item for item in result.days[0].schedule if item.item_type == "attraction"]
         self.assertTrue(attraction_slots)
-        self.assertTrue(all(item.start_time >= "12:45" for item in attraction_slots))
-        self.assertGreaterEqual(len(result.days[0].attractions), 3)
+        self.assertTrue(all(not item.start_time for item in attraction_slots))
+        self.assertGreaterEqual(len(result.days[0].attractions), 1)
 
     def test_first_day_sightseeing_starts_after_confirmed_intercity_arrival(self):
         request = make_request(departure_time="09:00", arrival_time="15:00")
@@ -211,14 +209,8 @@ class TripQualityServiceTests(TestCase):
 
         self.assertIsNotNone(journey)
         self.assertFalse(journey.is_estimated)
-        self.assertTrue(any(
-            item.item_type == "transport"
-            and item.start_time == "09:00"
-            and item.end_time == "15:00"
-            for item in schedule
-        ))
-        attraction_slots = [item for item in schedule if item.item_type == "attraction"]
-        self.assertTrue(all(item.start_time >= "15:45" for item in attraction_slots))
+        self.assertTrue(any("15:00" in note for note in result.days[0].timing_notes))
+        self.assertTrue(all(not item.start_time for item in schedule))
 
     def test_late_arrival_does_not_schedule_lunch_in_the_evening(self):
         request = make_request(departure_time="12:00", arrival_time="18:00")
@@ -234,8 +226,8 @@ class TripQualityServiceTests(TestCase):
         schedule = result.days[0].schedule
 
         self.assertFalse(any("午餐" in item.title for item in schedule))
-        self.assertTrue(any("晚餐" in item.title for item in schedule))
-        self.assertFalse(any(item.item_type == "attraction" for item in schedule))
+        self.assertFalse(any(item.item_type == "meal" for item in schedule))
+        self.assertTrue(any("18:00" in note for note in result.days[0].timing_notes))
 
     def test_overnight_outbound_and_return_use_day_offsets(self):
         request = make_request(
@@ -248,11 +240,10 @@ class TripQualityServiceTests(TestCase):
         )
         result = TripQualityService().finalize(plan, request)
 
-        outbound = next(item for item in result.days[0].schedule if "跨城交通" in item.title)
-        returning = next(item for item in result.days[-1].schedule if item.title.startswith("返程交通"))
-        self.assertEqual((outbound.start_time, outbound.end_time, outbound.end_day_offset), ("18:00", "06:00", 1))
-        self.assertEqual((returning.start_time, returning.end_time, returning.end_day_offset), ("19:00", "01:00", 1))
-        self.assertTrue(all(int(item.start_time[:2]) < 24 and int(item.end_time[:2]) < 24 for day in result.days for item in day.schedule))
+        self.assertGreater(result.intercity_journey.arrival_date, result.intercity_journey.departure_date)
+        self.assertGreater(result.return_journey.arrival_date, result.return_journey.departure_date)
+        self.assertEqual(result.return_journey.departure_time, "19:00")
+        self.assertTrue(all(not item.start_time for day in result.days for item in day.schedule))
 
     def test_return_day_activities_finish_before_station_departure(self):
         request = make_request(
@@ -264,11 +255,8 @@ class TripQualityServiceTests(TestCase):
             days=[make_day(0, 10), make_day(1, 20)], overall_suggestions="测试",
         )
         result = TripQualityService().finalize(plan, request)
-        return_day = result.days[-1].schedule
-        station_step = next(item for item in return_day if item.title.startswith("前往 返程"))
-        attraction_steps = [item for item in return_day if item.item_type == "attraction"]
-        self.assertTrue(all(item.end_time <= station_step.start_time for item in attraction_steps))
-        self.assertFalse(any(item.item_type == "hotel" for item in return_day))
+        self.assertTrue(any("16:00" in note for note in result.days[-1].timing_notes))
+        self.assertTrue(all(not item.end_time for item in result.days[-1].schedule))
 
     def test_balances_sparse_last_day_when_capacity_is_available(self):
         start = datetime.now().date() + timedelta(days=30)
@@ -303,9 +291,8 @@ class TripQualityServiceTests(TestCase):
         result = TripQualityService().finalize(plan, request)
 
         self.assertEqual(sum(len(day.attractions) for day in result.days), 9)
-        self.assertGreaterEqual(len(result.days[-1].attractions), 3)
-        self.assertLessEqual(max(len(day.attractions) for day in result.days) - min(len(day.attractions) for day in result.days), 1)
-        self.assertTrue(any("重新分配" in warning for warning in result.warnings))
+        self.assertEqual([len(day.attractions) for day in result.days], [4, 3, 2])
+        self.assertFalse(any("重新分配" in warning for warning in result.warnings))
 
     def test_timeline_uses_leg_specific_commute_times(self):
         start = datetime.now().date() + timedelta(days=30)

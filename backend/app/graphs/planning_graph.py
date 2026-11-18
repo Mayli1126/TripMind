@@ -27,6 +27,10 @@ from ..services.day_pipeline_service import (
     parse_skeleton,
 )
 from ..services.trip_quality_service import trip_quality_service
+from ..services.hotel_research_service import research_hotels, hotels_digest, bind_hotels_to_plan
+from ..services.tourism_research_service import (
+    TourismResearchError, bind_researched_request, enforce_researched_plan, research_tourism,
+)
 from .state import PlanningState
 
 ProgressCallback = Optional[Callable[..., None]]
@@ -159,13 +163,29 @@ _RESEARCH_DEFAULTS = {
 
 
 def poi_research_node(state: PlanningState, config: RunnableConfig) -> dict:
-    """景点研究分支：高德 POI 检索 + 偏好匹配（纯 Service 调用，无 LLM 决策）。"""
+    """无攻略时优先联网生成并核验草案；用户已有攻略候选时沿用既有研究。"""
     planner = _get_planner()
     callback = _callback_from_config(config)
     request: TripRequest = state["request"]
     planner.report_progress(
         callback, 12, "parallel_research", "景点 Agent 已开始工作", "attractions", "running"
     )
+    from ..services.baidu_search_service import BaiduSearchService
+    if not request.candidate_places and BaiduSearchService().configured:
+        planner.report_progress(callback, 16, "tourism_search", "正在联网搜索并生成逐日草案", "attractions", "running")
+        try:
+            candidates, skeleton_raw = research_tourism(request)
+        except TourismResearchError as exc:
+            planner.report_progress(callback, 30, "tourism_validation", str(exc), "attractions", "degraded")
+            # 把可展示原因带到汇合点，统一停止；绝不走旧景点检索绕过核验。
+            return {"context": {"tourism_error": str(exc), "tourism_error_details": exc.details}}
+        except Exception:
+            # 存储或适配器异常同样不能绕过选点核验；对外只显示固定原因。
+            return {"context": {"tourism_error": "联网选点服务暂不可用，请稍后重试"}}
+        planner.report_progress(callback, 30, "tourism_validation", f"已核对 {len(candidates)} 个同城旅游地点", "attractions", "completed")
+        return {"context": {"attractions": "地点已由联网资料和高德核对，按草案继续落地。",
+                            "tourism_candidates": [c.model_dump(mode="json") for c in candidates],
+                            "tourism_skeleton": skeleton_raw}}
     try:
         value, warning = planner.run_agent_safely(
             planner.attraction_agent,
@@ -209,28 +229,27 @@ def weather_research_node(state: PlanningState, config: RunnableConfig) -> dict:
 
 
 def hotel_research_node(state: PlanningState, config: RunnableConfig) -> dict:
-    """住宿研究分支：按住宿档次搜索酒店。"""
+    """酒店固定检索：不让模型反复决策、查详情或扩写推荐。"""
     planner = _get_planner()
     callback = _callback_from_config(config)
     request: TripRequest = state["request"]
     planner.report_progress(
-        callback, 12, "parallel_research", "酒店 Agent 已开始工作", "hotels", "running"
+        callback, 12, "parallel_research", "正在快速检索酒店地点", "hotels", "running"
     )
     try:
-        value, warning = planner.run_agent_safely(
-            planner.hotel_agent,
-            f"请搜索{request.city}的{request.accommodation}酒店",
-            "酒店检索",
-        )
+        hotels, warning = research_hotels(request)
+        value = hotels_digest(hotels)
     except Exception as exc:
         value = _RESEARCH_DEFAULTS["hotels"]
-        warning = f"酒店 Agent未完成：{planner.friendly_error(exc)}。"
+        hotels = []
+        warning = "酒店地点检索暂不可用，住宿暂按档次预留预算。"
     planner.report_progress(
         callback, 60, "parallel_research",
-        f"酒店 Agent{'已降级' if warning else '已完成'}",
+        f"酒店检索{'已降级，保留住宿预算' if warning else '已完成'}",
         "hotels", "degraded" if warning else "completed",
     )
-    return {"context": {"hotels": value}, "warnings": [warning] if warning else []}
+    return {"context": {"hotels": value, "hotel_candidates": [h.model_dump(mode="json") for h in hotels]},
+            "warnings": [warning] if warning else []}
 
 
 def intercity_research_node(state: PlanningState, config: RunnableConfig) -> dict:
@@ -290,14 +309,16 @@ def generate_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
     callback = _callback_from_config(config)
     request = _as_request(state["request"])
     context = state.get("context", {})
+    request = bind_researched_request(request, context)
+    researched = "tourism_candidates" in context
 
     planner.report_progress(callback, 72, "research_joined", "并行资料已汇合，准备生成行程")
-    if getattr(request, "candidate_places", None):
+    if getattr(request, "candidate_places", None) and not researched:
         planner.report_progress(
             callback, 74, "candidate_alignment", f"将优先安排你确认的 {len(request.candidate_places)} 个攻略候选地点"
         )
     # 批2 日编排管线优先：容量(确定性) -> 骨架(LLM 只出名称) -> 物化(候选/高德回填)。
-    # 失败自动回退单次大 JSON 旧路径（含既有桩测试环境），行为兼容。
+    # 旧模式失败可回退完整 JSON；联网核验模式失败必须明确停止。
     planner_response = ""
     trip_plan = None
     try:
@@ -310,10 +331,23 @@ def generate_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
         )
         planner.report_progress(callback, 78, "skeleton_generation", "正在根据时间和偏好编排行程骨架")
         from ..config import get_settings
-        if get_settings().skeleton_direct_enabled and hasattr(planner.planner_agent, 'llm'):
-            # The skeleton needs no tools or full-plan agent/system prompt.
-            # Per-request kwargs avoid changing a shared client's token limit concurrently.
-            # Reasoning models share this budget with hidden reasoning; keep the configured floor.
+        if researched:
+            from ..services.planner_arrangement_service import arrange_researched_plan
+            try:
+                trip_plan, skeleton_raw = arrange_researched_plan(request, context, planner.planner_agent.llm)
+            except Exception as exc:
+                from ..services.planning_repair_service import record_planning_diagnostic
+                details = {"error_type": type(exc).__name__}
+                if hasattr(exc, "errors"):
+                    details["validation_errors"] = exc.errors(include_input=False)
+                elif isinstance(exc, (ValueError, KeyError)):
+                    details["reason"] = str(exc)[:800]
+                record_planning_diagnostic("initial_planner_rejected", **details)
+                raise TourismResearchError("Planner 编排结构校验失败，未切换为未经核验的整份重生成", details) from None
+        elif get_settings().skeleton_direct_enabled and hasattr(planner.planner_agent, 'llm'):
+            # 生成行程骨架不需要工具，也不需要完整规划智能体的系统提示词。
+            # 通过单次请求参数设置输出上限，避免并发修改共享客户端。
+            # 推理模型会与隐藏思考共用额度，因此保留配置中的最低输出预算。
             skeleton_raw = planner.planner_agent.llm.invoke([
                 {'role': 'system', 'content': '只返回紧凑的行程骨架JSON，不输出推理过程、不调用工具。'},
                 {'role': 'user', 'content': skeleton_prompt},
@@ -323,11 +357,14 @@ def generate_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
             skeleton_raw = planner.run_agent_fresh(planner.planner_agent, skeleton_prompt)
         # 若后续结构校验仍需修复，至少把原始骨架交给修复器，不能传空字符串。
         planner_response = skeleton_raw
-        skeletons, overall = parse_skeleton(skeleton_raw, capacities)
-        planner.report_progress(callback, 82, "materializing", "正在用地图数据填充景点坐标")
-        trip_plan = materialize_skeleton(request, skeletons, overall)
+        if not researched:
+            skeletons, overall = parse_skeleton(skeleton_raw, capacities)
+            planner.report_progress(callback, 82, "materializing", "正在用地图数据填充景点坐标")
+            trip_plan = materialize_skeleton(request, skeletons, overall)
         planner.report_progress(callback, 86, "validating", "正在校验计划结构与可执行性")
     except DayPipelineError as exc:
+        if researched:
+            raise TourismResearchError("联网草案未通过每日编排校验，请调整需求后重试") from None
         print(f"⚠️ 日编排管线回退单次生成：{exc}")
         planner.report_progress(callback, 78, "fallback_generation", "骨架需要调整，正在重新生成完整行程")
         trip_plan = None
@@ -339,7 +376,7 @@ def generate_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
         planner.report_progress(callback, 86, "validating", "正在校验计划结构与可执行性")
         trip_plan = planner.parse_response(planner_response, request)
     replan_count = 0
-    if planner.needs_repair(trip_plan, request):
+    if not researched and planner.needs_repair(trip_plan, request):
         print("🔁 Validator发现结构性问题，执行一次受限重规划...")
         planner.report_progress(callback, 89, "repair_generation", "发现结构问题，正在自动修复")
         repaired_plan = planner.repair_plan(request, planner_response)
@@ -356,6 +393,12 @@ def generate_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
 
     # 候选对账：回填已核对坐标/poi_id，必去缺失写提示（不强制塞入行程）
     trip_plan.warnings.extend(apply_candidates_to_plan(trip_plan, request))
+    if "hotel_candidates" in context:
+        # 联网草案不含酒店名时，也使用同一批真实候选回填坐标与地址。
+        bind_hotels_to_plan(trip_plan, request, context["hotel_candidates"])
+    if researched:
+        enforce_researched_plan(trip_plan, context["tourism_candidates"])
+        trip_plan.warnings.append("景点依据来自百度联网搜索并经高德核对；推荐理由不等于营业时间、预约或门票已实时核实。")
     trip_plan.warnings.extend(state.get("warnings", []))
     return {
         "plan": trip_plan,
@@ -570,15 +613,37 @@ def finalize_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
     callback = _callback_from_config(config)
     trip_plan = _as_plan(state["plan"])
     request = _as_request(state["request"])
+    context = state.get("context", {})
+    request = bind_researched_request(request, context)
 
-    planner.report_progress(callback, 93, "optimizing", "正在核对时间轴、路线和预算")
+    planner.report_progress(callback, 93, "optimizing", "正在核对游玩顺序与参考耗时、路线和预算")
     trip_plan = trip_quality_service.finalize(
         trip_plan,
         request,
         intercity_cost_per_person=state.get("intercity_cost_per_person", 0),
         transportation_option=_as_transportation_option(state.get("transportation_option")),
         resolve_routes=True,
+        bind_meals=False,
+        preserve_arrangement="tourism_candidates" in context,
     )
+    if "tourism_candidates" in context:
+        enforce_researched_plan(trip_plan, context["tourism_candidates"])
+        from ..services.planning_supplement_service import supplement_candidates_once
+        request = supplement_candidates_once(trip_plan, request)
+        # 扩充的是系统候选池，最终校验必须使用同一池，不能把合法新增误判为越界。
+        context = dict(context, tourism_candidates=[c.model_dump(mode="json") for c in request.candidate_places])
+        from ..services.planning_repair_service import repair_planning_once
+        from ..services.planning_feedback_service import build_planning_feedback
+        review = build_planning_feedback(trip_plan, request)
+        if review.conflicts or any(w.type == "underfilled_day" for w in review.soft_warnings):
+            planner.report_progress(callback, 94, "local_repair", "正在检查排程冲突与偏空日期的备用候选")
+        trip_plan, _, repaired = repair_planning_once(
+            trip_plan, request, planner.planner_agent.llm,
+            intercity_cost=state.get("intercity_cost_per_person", 0),
+        )
+        if repaired:
+            trip_plan.planning_iterations = 2
+        enforce_researched_plan(trip_plan, context["tourism_candidates"])
     # 总体建议：收尾时基于完整行程（含预算/天气/交通约束）重写为多条实用贴士；
     # 失败保留骨架阶段的两三句话原文，绝不影响主流程出结果
     planner.report_progress(callback, 96, "tips", "正在根据完整行程整理出行建议")
@@ -595,7 +660,10 @@ def finalize_plan_node(state: PlanningState, config: RunnableConfig) -> dict:
     else:
         planner.report_progress(callback, 97, "finalized", "行程与出行建议已整理完成")
 
-    return {"result": trip_plan}
+    from ..services.planning_feedback_service import build_planning_feedback
+    feedback = build_planning_feedback(trip_plan, request)
+    trip_plan.warnings = list(dict.fromkeys([*trip_plan.warnings, *[w.message for w in feedback.soft_warnings]]))
+    return {"result": trip_plan, "planning_feedback": feedback.model_dump(mode="json"), "context": context}
 
 
 # ---------------------------------------------------------------------------
@@ -662,7 +730,7 @@ def run_planning_graph(
     recover: bool = False,
     expected_question: Any = None,
 ) -> TripPlan:
-    """以同步方式执行规划图；异常时退回 fallback 计划（与旧行为一致）。
+    """同步执行规划图；旧模式异常可返回参考计划，联网核验失败明确停止。
 
     resume_value 不为 None 时，恢复 job_id 对应断点继续执行（interrupt 之后）。
     图触发 interrupt 时抛出 PlanningWaitingInput（由 Worker 落 waiting_input 状态）。
@@ -687,7 +755,7 @@ def run_planning_graph(
         if interrupted and resume_value is not None and expected_question:
             questions=[getattr(interrupt,'value',None) for task in checkpoint.tasks for interrupt in getattr(task,'interrupts',())]
             if expected_question not in questions:
-                resume_value=None  # The old choice already advanced to a different confirmation.
+                resume_value=None  # 旧选项已处理，当前流程已经进入另一轮确认。
         if checkpoint and checkpoint.next and not interrupted:
             from ..infrastructure.task_trace import emit
             emit('runtime','checkpoint','resumed',reason='pending_nodes')
@@ -695,7 +763,7 @@ def run_planning_graph(
         elif resume_value is not None and job_id:
             payload: Any = Command(resume=resume_value)
         elif checkpoint and checkpoint.next:
-            payload=None  # Recover the persisted interrupt; do not restart research.
+            payload=None  # 恢复已持久化的中断状态，不重新执行资料查询。
         else:
             payload = PlanningState(
                 mode="plan",
@@ -719,7 +787,15 @@ def run_planning_graph(
         raise RuntimeError("规划图未产出结果")
     except PlanningWaitingInput:
         raise
+    except TourismResearchError as exc:
+        # 核验失败属于明确业务失败，不能变成带虚构景点的“成功参考计划”。
+        planner.report_progress(progress_callback, 97, "tourism_rejected", str(exc))
+        raise
     except Exception as exc:
+        from ..services.baidu_search_service import BaiduSearchService
+        if not request.candidate_places and BaiduSearchService().configured:
+            # 收尾等其他节点异常也不能把已启用的核验模式降级成未验证参考计划。
+            raise TourismResearchError("联网行程未能完成校验，请稍后重试或提供明确攻略") from None
         print(f"❌ 生成旅行计划失败: {str(exc)}")
         import traceback
         traceback.print_exc()

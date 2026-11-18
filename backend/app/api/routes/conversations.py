@@ -1,8 +1,7 @@
-"""Private conversation history and user-managed long-term preferences."""
+"""私有对话历史与用户自行管理的长期偏好。"""
 import json
 import time
 from typing import Any, Literal
-from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from ...infrastructure.database import application_database
@@ -98,7 +97,7 @@ def save_memory(memory_id: str, payload: MemoryWrite, request: Request):
             raise HTTPException(409, '偏好已更新或删除，请刷新比较后重试；本次内容未覆盖')
         if not row and db.execute('SELECT COUNT(*) FROM preference_memories WHERE user_id=?', (current_user(request)['id'],)).fetchone()[0] >= 100:
             raise HTTPException(400, '最多保存100条偏好，请先整理已有偏好')
-        # Old clients toggling a structured preference must not reset its added fields.
+        # 旧客户端切换结构化偏好状态时，不能重置新增字段。
         data = {**(dict(row) if row else {}), **payload.model_dump(exclude_unset=True)}
         try:
             preference = MemoryWrite.model_validate(data)

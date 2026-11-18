@@ -17,7 +17,6 @@ from ...models.schemas import (
 )
 from ...config import get_settings
 from ...services.amap_service import get_amap_service
-from ..auth import current_user
 from ...services.runtime_service import require_planning_runtime
 from ...services import planning_application_service
 from ...services.planning_job_service import planning_job_service
@@ -103,7 +102,7 @@ async def resume_planning_job(job_id: str, body: JobResumeRequest):
             detail=f"任务当前状态为 {current.status}，仅 waiting_input 状态可恢复",
         )
     try:
-        stored_request = planning_job_service.get_stored_request(job_id)
+        planning_job_service.get_stored_request(job_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="任务缺少原始请求，无法恢复") from exc
 
@@ -140,7 +139,7 @@ async def stream_planning_events(job_id: str, request: Request):
                 sequence = event["sequence"] + 1
                 payload = json.dumps(event, ensure_ascii=False)
                 yield f'id: {event["sequence"]}\nevent: progress\ndata: {payload}\n\n'
-            # Snapshots carry live timing without inventing progress or extending durable event history.
+            # 快照携带实时计时信息，不编造进度，也不扩展持久化事件历史。
             tick = asyncio.get_running_loop().time()
             if tick - last_snapshot_at >= 5 or current.status in {"completed", "failed", "cancelled"}:
                 snapshot = current.model_dump(mode="json", exclude={"data"})
@@ -231,10 +230,10 @@ async def query_transportation(request: TransportationRequest):
     """
     查询通勤费用
 
-    Args:
+    参数：
         request: 通勤查询请求参数
 
-    Returns:
+    返回：
         通勤费用响应
     """
     try:

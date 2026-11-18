@@ -11,7 +11,6 @@ from ..models.schemas import (
 from .route_optimizer import route_optimizer
 from .itinerary_schedule_service import itinerary_schedule_service
 from .physical_strength_service import physical_strength_service
-from .meal_location_service import meal_location_service
 from .transportation_mode_service import transportation_mode_service
 
 
@@ -26,8 +25,9 @@ class TripQualityService:
         request: TripRequest,
         intercity_cost_per_person: int = 0,
         transportation_option: TransportationOption | None = None,
-        bind_meals: bool = True,
+        bind_meals: bool = False,
         resolve_routes: bool = False,
+        preserve_arrangement: bool = False,
     ) -> TripPlan:
         from .price_reference_service import apply_price_references
         apply_price_references(plan)
@@ -35,9 +35,10 @@ class TripQualityService:
             from .price_reference_service import enrich_amap_costs
             enrich_amap_costs(plan)
             from .price_reference_service import enrich_llm_estimates
-            enrich_llm_estimates(plan, request)
-        duplicate_warnings = self.remove_duplicate_attractions(plan)
-        weather_warnings = self._apply_weather_rebalance(plan)
+            if not preserve_arrangement:
+                enrich_llm_estimates(plan, request)
+        duplicate_warnings = [] if preserve_arrangement else self.remove_duplicate_attractions(plan)
+        weather_warnings = [] if preserve_arrangement else self._apply_weather_rebalance(plan)
         plan.intercity_journey = self._build_intercity_journey(
             request, transportation_option, plan.intercity_journey
         )
@@ -45,22 +46,25 @@ class TripQualityService:
             request, transportation_option, plan.return_journey
         )
         transport_warnings = self._transport_warnings(plan, request)
-        capacity_warnings = self._rebalance_transport_days(plan, request)
+        # 不再按默认抵达/结束钟点搬动或删减地点，容量由总时长软提示表达。
+        capacity_warnings = []
         
         # 体力曲线建模：优化每日景点强度分配
-        plan = physical_strength_service.optimize_strength_distribution(plan, request)
+        if not preserve_arrangement:
+            plan = physical_strength_service.optimize_strength_distribution(plan, request)
         
-        # 用餐地点地理绑定（离线评测/测试传 bind_meals=False 保持确定性）
-        if bind_meals:
-            plan = meal_location_service.bind_meal_locations(plan)
-        
-        # 路线优化（考虑餐食位置）
-        plan = route_optimizer.optimize(plan)
+        # 仅提供游玩规划；兼容旧调用参数，但不再检索或绑定餐厅。
+        for day in plan.days:
+            day.meals = []
+
+        # 路线优化仅依据游玩地点。
+        if not preserve_arrangement:
+            plan = route_optimizer.optimize(plan)
         
         # 交通方式差异化
         plan = transportation_mode_service.optimize_daily_transport(plan)
         
-        plan = self.rebuild_schedule(plan, request, resolve_routes=resolve_routes)
+        plan = self.rebuild_schedule(plan, request, resolve_routes=resolve_routes, preserve_order=preserve_arrangement)
         if resolve_routes:
             live_count = sum(item.route_leg is not None and not item.route_leg.is_estimated
                              for day in plan.days for item in day.schedule)
@@ -101,22 +105,39 @@ class TripQualityService:
     def rebuild_schedule(
         self, plan: TripPlan, request: TripRequest, *,
         resolve_routes: bool = False, day_indexes: set[int] | None = None,
+        preserve_order: bool = False,
     ) -> TripPlan:
-        """统一道路耗时与时间线入口；指定日期时不改动其他天。"""
+        """统一游玩顺序与道路参考耗时入口；指定日期时不改动其他天。"""
         from .road_route_service import RoadRouteResolver
+
+        if resolve_routes:
+            from .route_anchor_service import resolve_plan_anchors
+            resolve_plan_anchors(plan, day_indexes)
 
         resolver = (
             RoadRouteResolver(plan.city, preference="自驾" if request.transportation == "自驾" else "")
             if resolve_routes else None
         )
-        return itinerary_schedule_service.build(plan, route_resolver=resolver, day_indexes=day_indexes)
+        return itinerary_schedule_service.build(plan, route_resolver=resolver, day_indexes=day_indexes,
+                                                preserve_order=preserve_order)
 
     def finalize_revision(
         self, plan: TripPlan, request: TripRequest, *,
         changed_days: set[int] | None = None, intercity_cost_per_person: int = 0,
     ) -> TripPlan:
         """增量收尾只重建受影响日和预算，不重复全局景点重排。"""
-        plan = self.rebuild_schedule(plan, request, resolve_routes=True, day_indexes=changed_days or None)
+        plan = self.rebuild_schedule(plan, request, resolve_routes=True, day_indexes=changed_days,
+                                     preserve_order=True)
+        for index, day in enumerate(plan.days):
+            if changed_days is not None and index not in changed_days:
+                continue
+            scheduled = {item.related_index for item in day.schedule if item.item_type == "attraction"}
+            missing = [a.name for position, a in enumerate(day.attractions) if position not in scheduled]
+            if missing:
+                plan.warnings.append(
+                    f"第{index + 1}天「{'、'.join(missing)}」缺少游玩步骤，请重新核对地点与路线。"
+                )
+        plan.warnings = list(dict.fromkeys(plan.warnings))
         plan.budget = self.calculate_budget(plan, request, intercity_cost_per_person)
         return plan
 
@@ -139,17 +160,8 @@ class TripQualityService:
         departure, _ = TripQualityService._parse_transport_time(departure_raw)
         arrival, explicit_offset = TripQualityService._parse_transport_time(arrival_raw)
         if not departure or not arrival:
-            # 未获取到班次时仍必须占用一段保守的跨城时间，不能让首日从早晨
-            # 直接在目的地开始。这里只用于可执行性约束，并明确标为估算值。
-            departure, arrival = {
-                "plane": ("08:00", "11:00"),
-                "high_speed_train": ("08:00", "12:00"),
-                "train": ("08:00", "14:00"),
-                "bus": ("08:00", "14:00"),
-                "自驾": ("08:00", "13:00"),
-                "公共交通": ("08:00", "12:00"),
-            }.get(mode, ("08:00", "12:00"))
-            explicit_offset = 0
+            # 未确认也未查到班次时，不再凭默认钟点构造跨城时刻。
+            return None
         dep_minutes = TripQualityService._minutes(departure)
         arr_minutes = TripQualityService._minutes(arrival)
         arrival_offset = explicit_offset or int(arr_minutes <= dep_minutes)
@@ -281,10 +293,8 @@ class TripQualityService:
                     closed_moved += 1
                     continue
                 candidate = [*keep, attraction]
-                must_keep_minimum = len(keep) < self._min_attractions(request.pace)
                 if len(keep) < self._max_attractions(request.pace) and (
-                    must_keep_minimum
-                    or self._estimated_day_load(plan, day_index, candidate) <= available
+                    self._estimated_day_load(plan, day_index, candidate) <= available
                 ):
                     keep.append(attraction)
                 else:
@@ -336,6 +346,9 @@ class TripQualityService:
         capacities: dict[str, int],
     ) -> int:
         """把 3/3/1 等失衡结果调成与每日可用时长相匹配的分布。"""
+        if all(day.attractions for day in plan.days) and any(a.match_evidence for day in plan.days for a in day.attractions):
+            # 已核验的联网草案不为平均景点数跨天搬运；容量超限由上游时长检查处理。
+            return 0
         total = sum(len(day.attractions) for day in plan.days)
         if total < 2 or not plan.days:
             return 0
@@ -400,7 +413,7 @@ class TripQualityService:
         self, plan: TripPlan, day_index: int, attractions: list,
     ) -> int:
         visit_minutes = sum(
-            min(max(item.visit_duration, 45), 240) for item in attractions
+            item.visit_duration for item in attractions
         )
         commute_minutes = round(
             self._day_route_distance(plan, day_index, attractions)
@@ -468,16 +481,8 @@ class TripQualityService:
             if not day.schedule or any(item.item_type == "attraction" and item.related_index == index for item in day.schedule)
         ) * request.travelers)
 
+        # 预算仅统计本项目提供的项目，餐饮字段为历史协议兼容而保留。
         meal_cost = 0
-        for day in plan.days:
-            scheduled_meal_titles = {
-                item.title for item in day.schedule if item.item_type == "meal"
-            }
-            meal_cost += sum(
-                meal.estimated_cost for meal in day.meals
-                if any(meal.name in title for title in scheduled_meal_titles)
-            )
-        meal_cost *= request.travelers
 
         # 入住晚数通常比旅行天数少 1。每天推荐的酒店只取对应入住夜晚。
         hotel_nights = max(request.travel_days - 1, 0)
@@ -513,7 +518,7 @@ class TripQualityService:
                     elif item.item_type == "transport" and (
                         item.title.startswith("前往 ") or item.title.startswith("抵达后")
                     ) and item.duration_minutes > 0:
-                        # Unknown station/airport connector: separate, visible reserve, not a ticket.
+                        # 车站或机场接驳未知时，单独展示预留费用，不将其当作票价。
                         segment_cost += 15 * request.travelers
             local_cost = ceil(segment_cost)
         transport_cost = intercity_cost + local_cost
@@ -554,7 +559,6 @@ class TripQualityService:
 
         seen_attractions: set[str] = set()
         categories: set[str] = set()
-        main_meals: set[str] = set()
         for index, day in enumerate(plan.days):
             expected_date = (start + timedelta(days=index)).isoformat()
             if day.day_index != index:
@@ -567,11 +571,6 @@ class TripQualityService:
                 issues.append(f"第 {index + 1} 天内容偏少，未达到所选行程节奏的建议数量。")
             if len(day.attractions) > self._max_attractions(request.pace):
                 issues.append(f"第 {index + 1} 天景点较多，可能不符合所选行程节奏。")
-
-            meal_types = {meal.type for meal in day.meals}
-            missing_meals = {"breakfast", "lunch", "dinner"} - meal_types
-            if missing_meals:
-                issues.append(f"第 {index + 1} 天缺少餐饮安排：{', '.join(sorted(missing_meals))}。")
 
             for attraction in day.attractions:
                 normalized_name = attraction.name.strip().lower()
@@ -588,16 +587,8 @@ class TripQualityService:
             for attraction in day.attractions:
                 if attraction.name.strip().lower() not in scheduled_attractions:
                     issues.append(
-                        f"第 {index + 1} 天的“{attraction.name}”受交通截止或开放时间限制，未进入可执行时间轴。"
+                        f"第 {index + 1} 天的“{attraction.name}”未进入游玩顺序。"
                     )
-
-            for meal in day.meals:
-                if meal.type not in {"lunch", "dinner"}:
-                    continue
-                normalized_meal = meal.name.strip().lower()
-                if normalized_meal in main_meals:
-                    issues.append(f"餐饮“{meal.name}”在多天行程中重复出现。")
-                main_meals.add(normalized_meal)
 
         attraction_total = sum(len(day.attractions) for day in plan.days)
         if attraction_total and len(categories) < min(3, attraction_total):
@@ -631,7 +622,7 @@ class TripQualityService:
 
     @staticmethod
     def _min_attractions(pace: str) -> int:
-        return 3
+        return 1
 
     @staticmethod
     def default_sources(is_fallback: bool) -> list[DataSource]:

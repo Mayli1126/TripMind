@@ -1,6 +1,6 @@
-"""Date-scoped live opening data and opt-in, source-validated policy adapter.
+"""按日期获取实时营业信息，并提供显式启用、核验来源的政策适配器。
 
-Amap business hours are NOT proof of reservation policy. No LLM verification.
+高德营业时间不能证明预约政策，模型生成内容也不能作为核验依据。
 """
 import json
 import sqlite3
@@ -47,7 +47,7 @@ def refresh(poi_id, visit_date):
     if not settings.cache_enabled and value.get('next_check') and datetime.fromisoformat(value['next_check']) > now:
         return value
     errors = []
-    # Preserve previous successful facts if either source fails; never extend their expiry on failure.
+    # 任一数据源失败时保留已有成功结果，失败不能延长事实的过期时间。
     if settings.amap_api_key:
         try:
             from .public_advisory_cache import opening
@@ -66,7 +66,7 @@ def refresh(poi_id, visit_date):
         errors.append('未接入官方预约政策源；地图营业时间不代表预约要求已核验')
     value['errors'] = errors
     value['last_attempt'] = now.isoformat()
-    # Short backoff on partial failure; successful facts carry independent expiry times.
+    # 部分失败时短暂退避，成功事实各自保留独立的过期时间。
     value['next_check'] = (now + timedelta(minutes=10 if errors else 60)).isoformat()
     with application_database.connection() as db:
         db.execute('INSERT OR REPLACE INTO advisory_cache VALUES (?, ?)', (key(poi_id, visit_date), json.dumps(value, ensure_ascii=False)))
@@ -79,7 +79,7 @@ def overlay(advisory, poi_id, visit_date):
     from .public_advisory_cache import validate_policy
     now = datetime.now(timezone.utc)
     settings = get_settings()
-    # Stored trip projections and SQLite snapshots must not retain expired verification.
+    # 历史行程投影和 SQLite 快照不能保留已过期的核验状态。
     if advisory and advisory.fact_status == 'verified':
         advisory.fact_status = 'unverified'
         advisory.reservation_required = 'unknown'
@@ -121,7 +121,7 @@ def overlay(advisory, poi_id, visit_date):
         advisory.reservation_url = policy['reservation_url']
         advisory.verified_at = policy['verified_at']
         advisory.expires_at = policy['expires_at']
-        advisory.fact_status = 'verified'  # policy only, not guide tips or closure rules
+        advisory.fact_status = 'verified'  # 只处理预约政策，不处理攻略提示或闭馆规则。
         advisory.source_refs = list(dict.fromkeys([*advisory.source_refs, '预约政策：' + policy['source_url']]))
     return advisory
 
@@ -135,7 +135,7 @@ def refresh_trip(trip):
 
 
 def refresh_due():
-    """Operator-triggered refresh for saved trips occurring within seven days."""
+    """由用户主动刷新七天内出发的已保存行程。"""
     from ..models.schemas import get_app_today
     from .trip_store_service import trip_store_service
     today = get_app_today()

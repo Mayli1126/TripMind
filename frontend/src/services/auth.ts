@@ -59,7 +59,7 @@ export function sessionExpired() {
   useAccount(null)
 }
 
-// Browser cookies are shared across tabs: never leave the previous user's data mounted.
+// 浏览器标签页共享登录 Cookie，切换账号后不能继续展示前一用户的数据。
 window.addEventListener('storage', event => {
   if (event.key === ACCOUNT_KEY && event.newValue !== authState.user?.id) {
     clearPrivateData()

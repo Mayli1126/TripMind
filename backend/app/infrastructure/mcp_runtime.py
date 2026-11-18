@@ -1,4 +1,4 @@
-"""Pinned command/environment shared by deployment preparation and normal MCP use."""
+"""部署预热与日常 MCP 调用共用固定版本的命令和环境配置。"""
 
 import os
 import sys

@@ -1,4 +1,4 @@
-"""Central authentication and object authorization, including native SSE requests."""
+"""统一登录鉴权与资源归属校验，同时覆盖原生 SSE 请求。"""
 
 import re
 

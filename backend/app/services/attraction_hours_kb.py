@@ -1,13 +1,13 @@
-"""景点营业时间知识库 —— 为热门景点提供精确的营业时间和闭馆日数据。
+"""景点本地参考资料。
 
-当高德 MCP 返回中未包含开放时间，或 LLM 未填写时，
-用此知识库做兜底，避免博物馆被排到夜间或闭馆日。
+当前价格服务使用其中的门票参考价；营业时间等静态字段仅作为资料保留，
+不能视为按出行日期核验的实时营业或预约信息。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set
+from typing import Dict, Optional
 
 
 @dataclass(frozen=True)
@@ -1270,112 +1270,3 @@ ATTRACTION_HOURS_KB: Dict[str, Dict[str, AttractionHours]] = {
         ),
     },
 }
-
-
-# ── 通用默认规则（当知识库中找不到具体景点时使用）──
-DEFAULT_ATTRACTION_HOURS: Dict[str, AttractionHours] = {
-    "博物馆": AttractionHours(
-        opening_time="09:00",
-        closing_time="17:00",
-        last_entry_time="16:00",
-        closed_weekdays=(0,),
-        intensity_level=2,
-        recommended_duration=120,
-        category="博物馆",
-    ),
-    "寺庙": AttractionHours(
-        opening_time="08:00",
-        closing_time="17:00",
-        closed_weekdays=(),
-        intensity_level=1,
-        recommended_duration=90,
-        category="寺庙",
-    ),
-    "自然风光": AttractionHours(
-        opening_time="08:00",
-        closing_time="18:00",
-        closed_weekdays=(),
-        intensity_level=2,
-        recommended_duration=180,
-        category="自然风光",
-    ),
-    "城市公园": AttractionHours(
-        opening_time="06:00",
-        closing_time="21:00",
-        closed_weekdays=(),
-        intensity_level=1,
-        recommended_duration=60,
-        category="城市公园",
-    ),
-    "主题乐园": AttractionHours(
-        opening_time="09:00",
-        closing_time="21:00",
-        closed_weekdays=(),
-        intensity_level=3,
-        recommended_duration=300,
-        category="主题乐园",
-    ),
-    "历史街区": AttractionHours(
-        opening_time="10:00",
-        closing_time="22:00",
-        closed_weekdays=(),
-        intensity_level=1,
-        recommended_duration=90,
-        category="历史街区",
-    ),
-    "商业街": AttractionHours(
-        opening_time="10:00",
-        closing_time="22:00",
-        closed_weekdays=(),
-        intensity_level=1,
-        recommended_duration=60,
-        category="商业街",
-    ),
-    "夜景": AttractionHours(
-        opening_time="18:00",
-        closing_time="22:00",
-        closed_weekdays=(),
-        intensity_level=1,
-        recommended_duration=90,
-        category="夜景",
-    ),
-    "美食街": AttractionHours(
-        opening_time="10:00",
-        closing_time="23:00",
-        closed_weekdays=(),
-        intensity_level=1,
-        recommended_duration=60,
-        category="美食街",
-    ),
-    "动物园": AttractionHours(
-        opening_time="08:30",
-        closing_time="17:00",
-        closed_weekdays=(),
-        intensity_level=2,
-        recommended_duration=180,
-        category="动物园",
-    ),
-}
-
-
-def lookup_attraction(city: str, name: str) -> Optional[AttractionHours]:
-    """按城市和景点名称查询营业时间记录。支持模糊匹配。"""
-    city_kb = ATTRACTION_HOURS_KB.get(city)
-    if not city_kb:
-        return None
-
-    # 精确匹配
-    if name in city_kb:
-        return city_kb[name]
-
-    # 模糊匹配：包含关系
-    for known_name, hours in city_kb.items():
-        if known_name in name or name in known_name:
-            return hours
-
-    return None
-
-
-def lookup_by_category(category: str) -> AttractionHours:
-    """按类别返回默认营业时间。"""
-    return DEFAULT_ATTRACTION_HOURS.get(category, AttractionHours())

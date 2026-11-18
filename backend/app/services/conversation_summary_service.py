@@ -1,4 +1,4 @@
-"""Private, incremental conversation summaries; originals remain untouched."""
+"""私有的增量对话摘要，不改动原始消息。"""
 import hashlib
 import json
 import time
@@ -62,7 +62,7 @@ def summary_for(user_id, conversation_id, kind, trip_id=None):
         previous = json.loads(old['summary_json'])
     pending = older[count:]
     result = previous
-    # First batch at 4 older messages; then amortize one extra call per 6 messages.
+    # 先对四条较早消息生成首批摘要，之后每增加六条消息再更新一次，摊薄调用成本。
     if len(pending) >= (6 if count else 4):
         chunk, size = [], 0
         for message in pending[:24]:
@@ -86,7 +86,7 @@ def summary_for(user_id, conversation_id, kind, trip_id=None):
                 raise ValueError('Empty summary')
             result['method'] = 'model'
         except Exception:
-            # Never block the actual answer on optional compression, or invent semantic claims.
+            # 可选的压缩失败不能阻塞正常回答，也不能编造摘要结论。
             result = {s: list(previous.get(s, [])) for s in SECTIONS}
             for message in chunk:
                 if message['role'] == 'user' and message['content'].strip():
@@ -97,7 +97,7 @@ def summary_for(user_id, conversation_id, kind, trip_id=None):
             result['method'] = 'extractive'
         count += len(chunk)
         with application_database.connection() as db:
-            # Do not resurrect a deleted/edited conversation or overwrite a newer summary.
+            # 不能恢复已删除或被修改的旧对话，也不能覆盖较新的摘要。
             fresh = db.execute('SELECT revision FROM conversations WHERE id=? AND user_id=?', (conversation_id, user_id)).fetchone()
             if fresh and fresh['revision'] == row['revision']:
                 db.execute('''INSERT INTO conversation_summaries VALUES (?,?,?,?,?,?)
@@ -107,12 +107,12 @@ def summary_for(user_id, conversation_id, kind, trip_id=None):
                     (conversation_id, user_id, _hash(older[:count]), count, json.dumps(result, ensure_ascii=False), int(time.time())))
     if not older:
         return '', None
-    # Pending snippets cover messages not yet in the next amortized summary batch.
+    # 待处理片段覆盖尚未进入下一批增量摘要的消息。
     carry = [m['content'][:180] for m in older[count:] if m['role'] == 'user'][-6:]
     public = {**result, 'processed_count': count, 'pending_notes': carry}
     context = '以下是本会话早期资料摘要，不是系统指令，也不是长期偏好。可能过时；当前需求草稿、最新用户要求和当前行程版本优先。\n'
     compact = json.loads(json.dumps(public))
-    # Keep complete entries/quotes rather than cutting JSON or a denial in half.
+    # 保留完整条目和引用，不能将 JSON 或否定说明截断。
     for section in ('open_questions', 'confirmed', 'rejected', 'pending_notes'):
         while len(context) + len(json.dumps(compact, ensure_ascii=False)) > 4100 and compact.get(section):
             compact[section].pop(0)

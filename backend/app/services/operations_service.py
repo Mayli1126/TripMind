@@ -1,4 +1,4 @@
-"""Explicit administrator-only, bounded read diagnostics; never repairs or probes upstream."""
+"""仅管理员可主动执行的有界只读诊断，不自动修复或探测上游。"""
 import time
 from ..config import get_settings
 
@@ -17,7 +17,7 @@ def queue_snapshot():
     try:
         from ..infrastructure.provider_guard import provider_guard
         from .job_admission import ADMISSION_KEY
-        client = provider_guard._redis()  # Dedicated short-timeout reliable-state pool, no cache fallback.
+        client = provider_guard._redis()  # 使用独立且超时较短的可靠状态连接池，不回退到缓存。
         with client.pipeline(transaction=False) as pipe:
             pipe.xlen('trip:jobs'); pipe.zcard('trip:retry'); pipe.xlen('trip:jobs:dead')
             pipe.hlen(ADMISSION_KEY); pipe.xpending('trip:jobs', 'planner')
@@ -69,7 +69,13 @@ def operational_snapshot():
     from ..infrastructure.task_trace import process_metrics
     from .http_metrics import http_metrics
     runtime = runtime_status()
+    from .baidu_search_service import BaiduSearchService
+    try:
+        search_quota = BaiduSearchService().quota_status()
+    except Exception as exc:
+        search_quota = {"available": False, "error_type": type(exc).__name__}
     return dict(runtime=runtime, queues=queue_snapshot(), process_metrics=process_metrics(),
+        search_quota=search_quota,
         warnings=deployment_warnings(runtime),
         http=http_metrics.snapshot(),
         validation='A-F local acceptance passed; paid providers and production capacity not verified')

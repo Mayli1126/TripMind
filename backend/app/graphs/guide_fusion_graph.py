@@ -1,7 +1,7 @@
 """GuideFusionGraph 前半：攻略输入 -> 候选地点（产品化计划 7.2 节）。
 
 完整链路设计：
-    ingest -> extract -> verify -> merge -> user_select[interrupt] -> PlanningGraph
+    导入 → 提取 → 核验 → 合并 → 用户选择（中断等待）→ 规划图
 
 本图实现前半（ingest/extract/verify/merge）：
 - 每篇攻略独立解析，单篇失败记入 results（parse_status=failed），
@@ -23,7 +23,6 @@ from typing import Callable, Optional, Sequence, TypedDict
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
-from ..models.candidate import CandidatePlace
 from ..models.guide import (
     ExtractedPlace,
     GuideDocument,

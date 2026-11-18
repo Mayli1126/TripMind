@@ -275,7 +275,7 @@ defineExpose({ goTo })
 </style>
 
 <style scoped>
-/* Result-page photo journal variant. Original stacked mode stays available. */
+/* 结果页的图片手账样式，同时保留原有堆叠模式。 */
 .is-panorama { gap: 16px; }
 .is-panorama .cover-stage { height: clamp(240px, 20vw, 300px); overflow: hidden; border-radius: 24px; background: #dce8ec; }
 .is-panorama .cover-card { inset: 0; margin: 0; width: 100%; height: 100%; border-radius: 0; transform: none; transition: opacity .24s ease; box-shadow: none; }

@@ -1,4 +1,4 @@
-"""Shared stage timing for Redis and in-memory jobs; reading never changes the clock."""
+"""Redis 与内存任务共用阶段计时，读取不会改变计时状态。"""
 
 from copy import deepcopy
 from datetime import datetime
@@ -48,7 +48,7 @@ def advance_stage(metrics, stage, status, now, job_id, *, agent=None):
     elif status == "waiting_input":
         phase = "waiting_input"
     elif agent:
-        # Parallel branches share one wall-clock research phase, not four summed durations.
+        # 并行分支共用同一个资料查询阶段，不能把四个分支耗时直接相加。
         phase = "research" if old in {"queued", "initializing", "research"} else old
     else:
         phase = _PHASES.get(stage, stage)

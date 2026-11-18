@@ -58,7 +58,7 @@ def _parse_and_save(record: GuideSourceRecord, source: GuideInput) -> GuideSourc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from None
     try:
-        pool, results = run_guide_fusion(
+        _, results = run_guide_fusion(
             [source],
             city_hint=source.city,
             source_ids=[record.id],
@@ -134,7 +134,7 @@ def update_candidate_choices(source_id: str, payload: CandidateChoicesPayload):
     updated = guide_store_service.update_candidate_choices(source_id, payload.choices)
     if updated is None:
         raise HTTPException(status_code=404, detail="攻略来源不存在")
-    return {"updated": sum(1 for c in payload.choices.values())}
+    return {"updated": len(payload.choices)}
 
 
 class CandidateChoicesPayload(BaseModel):

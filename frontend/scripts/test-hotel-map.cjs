@@ -1,4 +1,4 @@
-// Local SDK fixture; no real map key, geocoding or provider calls.
+// 使用本地 SDK 替身，不使用真实地图密钥、地理编码或上游调用。
 const assert = require('node:assert/strict')
 const { chromium } = require('playwright')
 async function main() {

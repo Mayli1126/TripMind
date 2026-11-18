@@ -1,4 +1,4 @@
-"""Run existing unittest suite without paid calls or writes to the user's SQLite DB."""
+"""运行现有离线测试，不调用付费接口，也不写入用户的 SQLite 数据库。"""
 import contextlib
 import io
 import os
@@ -14,7 +14,7 @@ def main():
     root=Path(__file__).resolve().parents[1]
     for name in ('REDIS_ENABLED','CACHE_ENABLED','MCP_WARMUP_ON_STARTUP'):
         os.environ[name]='false'
-    for name in ('LLM_API_KEY','OPENAI_API_KEY','AMAP_API_KEY','UNSPLASH_ACCESS_KEY'):
+    for name in ('LLM_API_KEY','OPENAI_API_KEY','AMAP_API_KEY','UNSPLASH_ACCESS_KEY','BAIDU_SEARCH_API_KEY'):
         os.environ[name]=''
     real_db, real_connect = sqlite3.connect, socket.socket.connect
     with tempfile.TemporaryDirectory(prefix='tripmind-acceptance-') as temp:
@@ -23,7 +23,7 @@ def main():
                 path=Path(temp)/'tripmind.db'
             return real_db(path,*args,**kwargs)
         def connect(sock,address):
-            # Windows asyncio uses loopback socket pairs even for in-process TestClient.
+            # Windows 的 asyncio 即使使用进程内测试客户端，也需要本机回环套接字对。
             if isinstance(address,tuple) and address[0] not in ('127.0.0.1','::1','localhost'):
                 raise RuntimeError('Offline acceptance: external network disabled')
             return real_connect(sock,address)

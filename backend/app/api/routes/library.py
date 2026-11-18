@@ -1,4 +1,4 @@
-"""Personal trip library API."""
+"""个人行程库接口。"""
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from ..auth import current_user
@@ -19,6 +19,8 @@ from ...models.schemas import PlanningJobResponse
 from ...services.trip_assistant_service import answer_trip
 from ...services.planning_application_service import submit_saved_revision
 from ...services.quota_service import enforce_planning_quota
+from ...models.patch import ManualRevisionRequest
+from ...models.schemas import TripPlan
 
 router = APIRouter(prefix="/library", tags=["个人行程库"])
 
@@ -61,6 +63,17 @@ def _assistant_trip(trip_id: str, base_version: int):
     if trip.current_version != base_version:
         raise HTTPException(status_code=409, detail="行程已更新，请刷新对话并基于最新版本重新提问")
     return trip
+
+
+@router.post("/trips/{trip_id}/revision-preview", response_model=TripPlan)
+def manual_revision_preview(trip_id: str, payload: ManualRevisionRequest):
+    """从已保存版本生成手动修改预览；确认后仍通过统一版本接口保存。"""
+    from ...graphs.revision_graph import run_manual_revision
+    trip = _assistant_trip(trip_id, payload.base_version)
+    result = run_manual_revision(trip.request, trip.plan, payload)
+    # 路线计算期间版本可能变化，返回预览前再检查一次，保存时还会再次检查。
+    _assistant_trip(trip_id, payload.base_version)
+    return result
 
 
 @router.post("/trips/{trip_id}/assistant/messages", response_model=AssistantResponse)

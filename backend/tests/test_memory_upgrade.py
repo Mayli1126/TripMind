@@ -173,7 +173,6 @@ class MemoryUpgradeTests(TestCase):
             summary_for(self.user['id'],'long-chat','trip','wrong-trip')
 
     def test_plan_request_gets_server_summary_not_client_injection(self):
-        from app.models.planner_chat import PlannerChatResponse
         from tests.test_trip_quality import make_request
         from app.models.schemas import PlanningJobResponse
         from app.api.routes import trip

@@ -1,4 +1,4 @@
-"""Read-only SQLite migration audit. Never imports app singletons or prints row contents."""
+"""只读检查 SQLite 迁移准备情况，不导入应用单例或输出数据行内容。"""
 import argparse
 from contextlib import closing
 import hashlib
@@ -16,7 +16,7 @@ def audit(source):
     source = Path(source).resolve(strict=True)
     if not source.is_file():
         raise ValueError('Source must be an existing SQLite file')
-    # Backup API captures a consistent WAL-aware snapshot, without opening source writable.
+    # 使用备份接口获取包含预写日志的一致快照，不以可写方式打开源数据库。
     with TemporaryDirectory(prefix='tripmind-db-audit-') as temp:
         with closing(sqlite3.connect(source.as_uri() + '?mode=ro', uri=True, timeout=3)) as original:
             with closing(sqlite3.connect(Path(temp) / 'snapshot.db')) as snapshot:

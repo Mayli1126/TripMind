@@ -1,4 +1,4 @@
-"""Read-only operator report. Default does not connect to Redis or upstream providers."""
+"""面向运维的只读报告，默认不连接 Redis 或上游服务。"""
 import argparse
 import json
 from app.services.runtime_service import runtime_status

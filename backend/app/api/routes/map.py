@@ -2,14 +2,7 @@
 
 from fastapi import APIRouter, HTTPException, Query
 from starlette.concurrency import run_in_threadpool
-from typing import Optional
-from ...models.schemas import (
-    POISearchRequest,
-    POISearchResponse,
-    RouteRequest,
-    RouteResponse,
-    WeatherResponse
-)
+from ...models.schemas import POISearchResponse, RouteRequest, RouteResponse, WeatherResponse
 from ...services.amap_service import get_amap_service
 
 router = APIRouter(prefix="/map", tags=["地图服务"])
@@ -29,12 +22,12 @@ async def search_poi(
     """
     搜索POI
     
-    Args:
+    参数：
         keywords: 搜索关键词
         city: 城市
         citylimit: 是否限制在城市范围内
         
-    Returns:
+    返回：
         POI搜索结果
     """
     try:
@@ -70,10 +63,10 @@ async def get_weather(
     """
     查询天气
     
-    Args:
+    参数：
         city: 城市名称
         
-    Returns:
+    返回：
         天气信息
     """
     try:
@@ -107,10 +100,10 @@ async def plan_route(request: RouteRequest):
     """
     规划路线
     
-    Args:
+    参数：
         request: 路线规划请求
         
-    Returns:
+    返回：
         路线信息
     """
     try:
@@ -162,3 +155,46 @@ async def health_check():
             status_code=503,
             detail=f"服务不可用: {str(e)}"
         )
+
+
+# 四种方式只在用户展开时查询，不进入模型工具循环，也不生成虚假的可用路线。
+from typing import Literal
+from pydantic import BaseModel, Field
+from ...models.schemas import Location, TripPlan, TripRequest
+
+
+class TransportOptionsRequest(BaseModel):
+    city: str = Field(min_length=1, max_length=50)
+    date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    origin: Location
+    destination: Location
+    reference_time: Literal["10:00", "18:00"] = "10:00"
+
+
+class TransportSelectionRequest(BaseModel):
+    plan: TripPlan
+    request: TripRequest
+    segment_id: str
+    mode: Literal["walking", "cycling", "driving", "transit"]
+
+
+@router.post("/transport-options", summary="按需比较四种交通方式")
+def transport_options(payload: TransportOptionsRequest):
+    from ...services.road_route_service import RoadRouteResolver
+    resolver = RoadRouteResolver(payload.city)
+    options = []
+    for mode in ("walking", "cycling", "driving", "transit"):
+        leg = resolver.resolve(payload.origin, payload.destination, payload.date, payload.reference_time, mode)
+        available = leg.source == "amap_route" and not leg.is_estimated
+        options.append(dict(mode=mode, available=available, route=leg if available else None,
+                            message="" if available else "暂无可用道路路线，请稍后重试"))
+    return dict(options=options, note="按参考时段查询，实际耗时请以出行导航为准；驾车不含停车时间")
+
+
+@router.post("/transport-selection", response_model=TripPlan, summary="切换一段交通并重算耗时与预算")
+def transport_selection(payload: TransportSelectionRequest):
+    from ...services.transport_selection_service import select_transport
+    try:
+        return select_transport(payload.plan, payload.request, payload.segment_id, payload.mode)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc

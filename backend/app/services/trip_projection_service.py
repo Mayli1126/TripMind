@@ -11,6 +11,9 @@ from .trip_quality_service import trip_quality_service
 def project_stored_plan(plan_json: str, request_json: str) -> tuple[TripRequest, TripPlan]:
     """只修整展示所需数据，不查询实时价格或重新生成整份计划。"""
     plan = TripPlan.model_validate_json(plan_json)
+    # 为旧行程补齐稳定标识，手动操作与自然语言操作使用同一地点身份。
+    from .patch_service import ensure_stable_ids
+    ensure_stable_ids(plan)
     duplicate_warnings = trip_quality_service.remove_duplicate_attractions(plan)
     if duplicate_warnings:
         plan.warnings = [
@@ -18,8 +21,27 @@ def project_stored_plan(plan_json: str, request_json: str) -> tuple[TripRequest,
             if "在多天行程中重复出现" not in warning
         ]
         plan.warnings.extend(duplicate_warnings)
-    if any(not day.schedule for day in plan.days):
-        plan = itinerary_schedule_service.build(plan)
+    rebuild = set()
+    for index, day in enumerate(plan.days):
+        # 旧时间表只做展示投影，保留已查到的道路数据；不因读取历史版本发起联网查询。
+        day.schedule = [s for s in day.schedule if s.item_type in {"attraction", "transport", "hotel"}]
+        matched = set()
+        for item in day.schedule:
+            item.start_time = item.end_time = ""
+            item.start_day_offset = item.end_day_offset = 0
+            if item.item_type == "attraction" and item.related_index is not None:
+                if 0 <= item.related_index < len(day.attractions) and item.title == day.attractions[item.related_index].name:
+                    item.stable_id = day.attractions[item.related_index].stable_id
+                    matched.add(item.related_index)
+        if matched != set(range(len(day.attractions))):
+            rebuild.add(index)
+        day.schedule_mode = "duration"
+        day.meals = []
+        day.visit_minutes = sum(s.duration_minutes for s in day.schedule if s.item_type == "attraction")
+        day.transport_minutes = sum(s.duration_minutes for s in day.schedule if s.item_type in {"transport", "hotel"})
+        day.total_minutes = day.visit_minutes + day.transport_minutes
+    if rebuild:
+        plan = itinerary_schedule_service.build(plan, day_indexes=rebuild, preserve_order=True)
     # 使用model_construct跳过验证，避免历史行程日期过期导致验证失败
     request_data = json.loads(request_json)
     request_data.setdefault('destination_only', False)
@@ -33,6 +55,8 @@ def project_stored_plan(plan_json: str, request_json: str) -> tuple[TripRequest,
     from .price_reference_service import apply_price_references
     apply_price_references(plan)
     if plan.budget:
+        plan.budget.total -= plan.budget.total_meals
+        plan.budget.total_meals = 0
         old_total = plan.budget.total_attractions
         from .price_reference_service import attraction_cost
         ticket_total = ceil(sum(

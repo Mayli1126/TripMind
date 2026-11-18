@@ -1,4 +1,4 @@
-"""Local HTTP concurrency/failure contracts; no business database or paid providers."""
+"""验证本地 HTTP 并发与失败契约，不使用业务数据库或付费服务。"""
 import asyncio
 import json
 import sqlite3
